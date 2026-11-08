@@ -219,7 +219,7 @@ def test_revision_guard_direct(session, tmp_path, monkeypatch):
 
     path = tmp_path / 'legacy.epub'
     path.write_bytes(b'current book')
-    rev = hashlib.sha1(path.read_bytes()).hexdigest()
+    rev = hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
     work = Work(title='Test', file_path=str(path), file_format='epub')
     session.add(work)
     session.commit()
@@ -252,14 +252,14 @@ def test_revision_hash_cached_by_mtime(tmp_path, monkeypatch):
     calls = []
     def digest(path):
         calls.append(path)
-        return hashlib.sha1(path.read_bytes()).hexdigest()
+        return hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
     monkeypatch.setattr(storage, 'sha1_of_file', digest)
     assert _path_sha1(path) == _path_sha1(path)
     assert len(calls) == 1
     stamp = path.stat().st_mtime_ns
     path.write_bytes(b'other')
     os.utime(path, ns=(stamp + 1_000_000, stamp + 1_000_000))
-    assert _path_sha1(path) == hashlib.sha1(b'other').hexdigest()
+    assert _path_sha1(path) == hashlib.sha1(b"other", usedforsecurity=False).hexdigest()
     assert len(calls) == 2
     hashed = tmp_path / ('a' * 40 + '.epub')
     hashed.write_bytes(b'content addressed')
