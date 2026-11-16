@@ -43,6 +43,15 @@ jobs:
         # не обещает.
         run: python -m compileall -q .
 
+      - uses: astral-sh/setup-uv@v6
+      - name: Тесты (блокирующие)
+        # serg/tasks#3045: тесты в code-quality.yml annotate-only и были зелёными
+        # при 137 ошибках сбора. Раскатывать код, у которого падают тесты, нельзя:
+        # окружение — строго из uv.lock, любой упавший тест останавливает раскатку.
+        run: |
+          uv sync --locked --group dev --python 3.12
+          uv run --locked --no-sync python -m pytest -q tests
+
       - name: "Shell-скрипты — без CRLF и синтаксически целые"
         # Возврат каретки ломает запуск скрипта молча, и в codehealth это было
         # невидимо двое суток. Проверка стоит здесь, потому что позже её уже
