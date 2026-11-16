@@ -440,6 +440,11 @@ def _at_task(task: dict) -> tuple[str, int] | None:
     try:
         res = _check_mirrors(task["our"], task.get("at_creds"))
     except Exception:  # noqa: BLE001
+        # Сбой зеркала (протухшая сессия AT, InvalidToken кредов, новая разметка)
+        # не равен «на зеркале новых глав нет» — пишем в лог (serg/tasks#3045).
+        _log.warning(
+            "mirror check failed work=%s host=%s", wid, task["host"], exc_info=True
+        )
         return None  # неудачу НЕ кэшируем: следующий тик попробует снова
     _mirror_cache[wid] = (time.time(), res)
     return res
@@ -1029,13 +1034,19 @@ def check_one(
     cur = _chapter_count(mon.source_url, host, creds)
 
     at_info = None
+    mirror_error = None
     if _mirror_eligible(host, work_id, _w.title if _w else ""):
         try:
             at_info = _check_mirrors(
                 _descriptor(_w), store.creds_for_host(session, "author.today")
             )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # Не «на зеркале пусто», а «зеркало не проверено»: в лог и в ответ
+            # кнопке, чтобы отказ был виден (serg/tasks#3045).
+            _log.warning(
+                "mirror check failed work=%s host=%s", work_id, host, exc_info=True
+            )
+            mirror_error = str(e)[:200] or type(e).__name__
 
     best_url = mon.source_url
     best_cur = cur or 0
@@ -1071,6 +1082,8 @@ def check_one(
         "chapters_seen": seen,
         "chapters_found": best_cur,
     }
+    if mirror_error:
+        detail["mirror_error"] = mirror_error
 
     if (has_new or force) and auto_download:
         try:

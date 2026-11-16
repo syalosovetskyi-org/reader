@@ -1,0 +1,26 @@
+name: tests
+# БЛОКИРУЮЩИЙ прогон тестов (serg/tasks#3045).
+#
+# code-quality.yml гоняет pytest в режиме annotate-only: зависимости ставятся
+# `pip install ... || true`, тесты — `--continue-on-collection-errors || true`.
+# Там прогон с 137 ошибками сбора (нет PIL/defusedxml) был зелёным, то есть CI
+# проверял меньше трети набора и показывал success. Здесь окружение собирается
+# из uv.lock (`--locked`: lock, разошедшийся с pyproject, — красный прогон, а не
+# тихо недоустановленный пакет), и любой упавший тест красит прогон.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: зависимости из uv.lock
+        run: uv sync --locked --group dev --python 3.12
+      - name: pytest (блокирующий)
+        run: uv run --locked --no-sync python -m pytest -q tests
