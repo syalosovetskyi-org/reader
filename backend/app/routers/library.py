@@ -50,6 +50,31 @@ def _fsize(p: str) -> int:
         return 0
 
 
+# serg/tasks#3234: 21.11.2026 авто-дедуп склеил загрузки Unsong (PDF и три EPUB —
+# разные переводы) в самый большой файл и удалил EPUB, который Серж читал.
+# Дедуп нужен против calibre-стабов и повторных импортов; самостоятельный файл,
+# отличный от выжившего, он больше не удаляет.
+RECENT_READ_DAYS = 30
+
+
+def _keep_separately(session: Session, keep: Work, dup: Work) -> str:
+    """Причина НЕ сливать dup в keep (пустая строка — сливать можно)."""
+    from datetime import timedelta
+
+    if not dup.file_path:
+        return ""  # стаб без файла (calibre-ссылка) — сливаем как раньше
+    if keep.file_path and dup.sha1 and dup.sha1 == keep.sha1:
+        return ""  # тот же файл — настоящий дубль
+    if keep.file_path and (dup.file_format or "").lower() != (keep.file_format or "").lower():
+        return f"разные форматы ({dup.file_format} vs {keep.file_format})"
+    if dup.site == "upload" or keep.site == "upload":
+        return "пользовательская загрузка с другим файлом (другой перевод/издание)"
+    prog = session.exec(select(Progress).where(Progress.work_id == dup.id)).first()
+    if prog is not None and prog.last_read_time and prog.last_read_time > utcnow() - timedelta(days=RECENT_READ_DAYS):
+        return f"читалась {prog.last_read_time:%Y-%m-%d}"
+    return ""
+
+
 def _dedup_works(session: Session) -> int:
     """Схлопнуть дубли книг (одинаковые название+автор): оставить самый полный
     файл, перевесить на него мониторинг, снести прогресс и файлы дублей.
@@ -103,6 +128,11 @@ def _dedup_works(session: Session) -> int:
             cl.sort(key=lambda w: _fsize(w.file_path), reverse=True)  # полный — первым
             keep = cl[0]
             for dup in cl[1:]:
+                why = _keep_separately(session, keep, dup)
+                if why:
+                    log.info("dedup: оставляю отдельно work %s «%s» (выживший %s): %s",
+                             dup.id, dup.title, keep.id, why)
+                    continue
                 # Переносим на выжившего то, чего у него нет: calibre_id (иначе
                 # следующий calibre-синк пересоздаст удалённый дубль — рецидив),
                 # описание и обложку.

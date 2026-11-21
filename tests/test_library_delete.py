@@ -156,11 +156,14 @@ def test_dedup_works_rebinds_bookmarks_and_highlights_to_keep(client, tmp_path):
             file_format="epub",
             sha1="sha1-keep-dedup",
         )
+        # Дубль — calibre-стаб без своего файла (ради таких дедуп и существует;
+        # самостоятельный файл-загрузку он больше не удаляет — serg/tasks#3234).
         dup = Work(
             title="Война и мир",
             author="Лев Толстой",
-            site="upload",
-            file_path=str(f_dup),
+            site="calibre",
+            calibre_id=777,
+            file_path="",
             file_format="epub",
             sha1="sha1-dup-dedup",
         )
@@ -203,3 +206,49 @@ def test_dedup_works_rebinds_bookmarks_and_highlights_to_keep(client, tmp_path):
         # У дубля не осталось дочерних записей
         assert len(session.exec(select(Bookmark).where(Bookmark.work_id == dup_id)).all()) == 0
         assert len(session.exec(select(Highlight).where(Highlight.work_id == dup_id)).all()) == 0
+
+
+def test_dedup_keeps_separate_uploads_of_same_title(client, tmp_path):
+    """serg/tasks#3234: PDF и EPUB разных переводов одной книги — не дубли.
+    Авто-дедуп не должен удалять EPUB, который читали, в пользу большего PDF."""
+    from datetime import timedelta
+
+    from backend.app.db.models import Progress, utcnow
+    from backend.app.routers.library import _dedup_works
+
+    files = {}
+    for name, size in [("k.pdf", 5000), ("k.epub", 900), ("s.epub", 800), ("en.epub", 700)]:
+        f = tmp_path / name
+        f.write_bytes(b"x" * size)
+        files[name] = f
+
+    with Session(engine) as session:
+        works = [
+            Work(title="Unsong", author="Скотт Александер · перевод Алексея Катаева", site="upload",
+                 file_path=str(files["k.pdf"]), file_format="pdf", sha1="a1"),
+            Work(title="Unsong", author="Скотт Александер · перевод Алексея Катаева", site="upload",
+                 file_path=str(files["k.epub"]), file_format="epub", sha1="a2"),
+            Work(title="Unsong", author="Скотт Александер", site="upload",
+                 file_path=str(files["s.epub"]), file_format="epub", sha1="a3"),
+            Work(title="Unsong", author="Scott Alexander", site="upload",
+                 file_path=str(files["en.epub"]), file_format="epub", sha1="a4"),
+            # calibre-стаб того же названия — его слить можно
+            Work(title="Unsong", author="Scott Alexander", site="calibre", calibre_id=132,
+                 file_path="", file_format="epub", sha1=""),
+        ]
+        for w in works:
+            session.add(w)
+        session.commit()
+        ids = [w.id for w in works]
+        session.add(Progress(work_id=ids[1], ratio=0.05, locator="epubcfi(/6/4)",
+                             last_read_time=utcnow() - timedelta(hours=2), source="web"))
+        session.commit()
+
+        _dedup_works(session)
+
+        for wid in ids[:4]:
+            assert session.get(Work, wid) is not None, wid
+        for name in ("k.pdf", "k.epub", "s.epub", "en.epub"):
+            assert files[name].exists(), name
+        prog = session.exec(select(Progress).where(Progress.work_id == ids[1])).first()
+        assert prog is not None and prog.locator == "epubcfi(/6/4)"
