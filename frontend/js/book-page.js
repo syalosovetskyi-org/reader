@@ -16,6 +16,7 @@ import { logErr } from './core/log.js'
 import { chapterDate } from './core/chapterdate.js'
 import { icon } from './core/icons.js'
 import { renameBook } from './book-identity.js'
+import { mountEditions } from './editions.js'
 
 let curWork = null
 
@@ -319,6 +320,7 @@ function renderBookPage(w) {
     </div>
     ${chipsHtml ? `<div class="bp-section"><div class="bp-section-h">Жанры и метки</div><div class="bp-chips">${chipsHtml}</div></div>` : ''}
     ${descHtml ? `<div class="bp-section"><div class="bp-section-h">Описание</div>${descHtml}</div>` : ''}
+    <div class="bp-section" id="bp-editions"></div>
     <div class="bp-section" id="bp-toc-sec">
       <div class="bp-section-h">Оглавление <span id="bp-toc-count" class="bp-toc-count"></span></div>
       <input id="bp-toc-filter" class="bp-toc-filter" type="search" placeholder="Найти главу…"
@@ -563,6 +565,21 @@ function renderBookPage(w) {
     btn.title = w.hidden
       ? 'Вернуть книгу в библиотеку'
       : 'Убрать из библиотеки: останется доступной поиском'
+  })
+  // Издания (serg/tasks#3240): связанные файлы того же произведения.
+  mountEditions($('#bp-editions'), w, {
+    onOpen: async (id) => {
+      let target = w
+      if (id !== w.id) {
+        try { target = await api.get(`/api/library/${id}`) } catch (e) {
+          toast('Издание не открылось: ' + e.message, 'err')
+          return
+        }
+      }
+      $('#book-page').hidden = true
+      document.body.classList.remove('bookpage-open')
+      openReader(target)
+    },
   })
   // Оглавление подтягивается отдельным запросом: страница книги не должна
   // ждать разбора EPUB, а у файла в 181 главу список приходит не мгновенно.

@@ -111,6 +111,8 @@ $('#tap-next').addEventListener('click', goNext)
 // Клавиатура: стрелки, PageUp/Down, Home/End, пробел и Enter (вниз; с Shift — вверх).
 function handleKey(e) {
   if ($('#reader').hidden || !view) return
+  // Два издания рядом: клавиши листают половины сами, а не скрытую под ними книгу.
+  if (document.body.classList.contains('split-open')) return
   // В полях ввода (поиск, заметки) клавиши листания не перехватываем.
   const t = e.target
   if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || ''))) return

@@ -155,10 +155,13 @@ export async function loadLibrary() {
   document.body.classList.toggle('is-offline', offlineMode)
   detectAutoUpdates()
   // Один батч-запрос вместо N последовательных (раньше книги появлялись через 3-5с).
-  const [monitored, progAll, finishedIds] = await Promise.all([
+  const [monitored, progAll, finishedIds, editionProg] = await Promise.all([
     api.get('/api/monitored').catch(() => []),
     api.get('/api/progress').catch(() => ({})),
     api.get('/api/progress/finished').catch(() => null),
+    // Издания одной группы (serg/tasks#3240): карточка показывает прогресс
+    // последнего прочитанного издания. Не пришло — свой прогресс каждой книги.
+    api.get('/api/editions/progress').catch((e) => { console.warn('прогресс изданий не загрузился', e); return {} }),
   ])
   // Сеть упала — оставляем прошлый набор, а не «ничего не прочитано».
   if (Array.isArray(finishedIds)) {
@@ -168,7 +171,7 @@ export async function loadLibrary() {
   setLibUpdated(new Set(monitored.filter((m) => m.has_update && m.work_id).map((m) => m.work_id)))
   setLibMonitored(new Set(monitored.filter((m) => m.work_id).map((m) => m.work_id)))
   renderPendingPill(monitored)
-  setLibProgress(progAll || {})
+  setLibProgress({ ...(progAll || {}), ...(editionProg || {}) })
   // Единый класс «недавняя активность»: и обновление глав, и открытие/чтение
   // бампят work.updated_at на бэке. Сортируем строго по свежести — самое свежее
   // событие вверху (раньше has_update принудительно поднимались над недавно

@@ -48,8 +48,13 @@ def _progress_of(session: Session, ids: list[int]) -> dict[int, Progress]:
 
 
 def _stamp(p: Progress | None) -> int:
-    """Момент позиции в мс: saved_at клиента, иначе серверное время чтения."""
-    if p is None:
+    """Момент позиции в мс: saved_at клиента, иначе серверное время чтения.
+
+    Пустая позиция (книгу открыли, но места ещё нет) — 0: строку прогресса
+    создаёт само открытие, и её свежее время иначе перебивало бы настоящее
+    место в другом издании.
+    """
+    if p is None or not (p.locator or p.text_anchor or p.ratio):
         return 0
     if p.saved_at:
         return int(p.saved_at)

@@ -71,7 +71,31 @@ def tmp(name: str) -> Path:
 
 @pytest.fixture(autouse=True)
 def _cleanup():
+    """Убрать за собой книги, прогресс и группы: БД общая на весь прогон, и
+    оставленные «Unsong» без файла стали бы дублями для чужих тестов дедупа."""
+    from sqlalchemy import func
+
+    from backend.app.db.session import init_db
+
+    init_db()  # таблиц может ещё не быть: client-фикстура создаёт их позже
+    with Session(engine) as s:
+        before = s.exec(select(func.max(Work.id))).one() or 0
     yield
+    with Session(engine) as s:
+        new = s.exec(select(Work).where(Work.id > before)).all()
+        ids = [w.id for w in new]
+        gids = {w.edition_group_id for w in new if w.edition_group_id}
+        for p in s.exec(select(Progress).where(Progress.work_id.in_(ids))).all() if ids else []:
+            s.delete(p)
+        for w in new:
+            s.delete(w)
+        s.flush()
+        for g in gids:
+            left = s.exec(select(Work).where(Work.edition_group_id == g)).first()
+            grp = s.get(EditionGroup, g)
+            if grp and not left:
+                s.delete(grp)
+        s.commit()
     for p in BOOKS.glob("*"):
         p.unlink(missing_ok=True)
 
@@ -150,6 +174,13 @@ def test_sync_toggle_and_sync_target(client):
     put_progress(a, saved_at=9000)
     assert client.get(f"/api/editions/{a}/sync-target").json()["reason"] == "own_is_latest"
     assert client.get(f"/api/editions/{a}/sync-target?own_saved_at=1000").json()["apply"] is True
+
+    # Пустая своя позиция (строку создало само открытие, время свежее) не
+    # перебивает настоящее место в другом издании.
+    from datetime import datetime, timezone
+    put_progress(a, ratio=0.0, locator="", text_anchor="", saved_at=0,
+                 last_read_time=datetime.now(timezone.utc).replace(tzinfo=None))
+    assert client.get(f"/api/editions/{a}/sync-target").json()["apply"] is True
 
     assert client.put(f"/api/editions/{a}/sync", json={"sync": False}).json()["group"]["sync"] is False
     assert client.get(f"/api/editions/{a}/sync-target?own_saved_at=0").json()["reason"] == "sync_off"
