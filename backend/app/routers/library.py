@@ -528,9 +528,13 @@ def get_work(work_id: int, session: Session = Depends(get_session)) -> dict:
         raise HTTPException(404, "work not found")
     from ..book_revision import file_rev
 
+    from ..editions import official_epub_for
+
     d = work.model_dump()
     d["file_rev"] = file_rev(work)
     d.update(_completeness(work, session))
+    off = official_epub_for(session, work)
+    d["official_epub_id"] = off.id if off is not None else None
     return d
 
 

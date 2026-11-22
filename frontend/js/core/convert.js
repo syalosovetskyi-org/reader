@@ -13,6 +13,9 @@ const CONVERTIBLE = new Set(['pdf', 'djvu', 'mobi', 'azw3', 'doc', 'docx', 'rtf'
 const PREF_KEY = 'reader:pdf-as-epub'
 
 export function convertible(work) {
+  // Есть официальный EPUB того же текста (группа изданий) — самодельную
+  // конвертацию не предлагаем и не запускаем (Серж 22.11, serg/tasks#3240).
+  if (work?.official_epub_id) return false
   return CONVERTIBLE.has(String(work?.file_format || '').toLowerCase())
 }
 
