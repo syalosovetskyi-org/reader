@@ -139,6 +139,14 @@ def start_convert(work_id: int, force: bool = False) -> dict:
         st = _status_of(work)
         if st["ready"] and not force:
             return st
+        from ..editions import official_epub_for
+
+        off = official_epub_for(s, work)
+        if off is not None:
+            # Есть официальный EPUB того же текста — самодельный хуже и не нужен.
+            raise HTTPException(
+                409, f"у книги есть официальный EPUB (издание {off.id}) — конвертировать незачем"
+            )
         work.converted_status = "pending"
         work.converted_error = ""
         if force:

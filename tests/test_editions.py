@@ -356,3 +356,29 @@ def test_migration_adds_columns_to_old_db(tmp_path, monkeypatch):
     with eng.connect() as c:
         from sqlalchemy import text
         assert c.execute(text("SELECT language, edition_group_id FROM work")).first() == ("", None)
+
+
+def test_no_conversion_when_official_epub_exists(client):
+    """Серж 22.11: PDF не конвертировать, если у того же текста есть
+    официальный EPUB. Другой перевод конвертацию не запрещает."""
+    ru = add_work(path=epub(tmp("ru.epub"), RU, "ru"))
+    en = add_work(title="Unsong", path=epub(tmp("en.epub"), EN, "en"))
+    pdf = tmp("ru.pdf")
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    p = add_work(path=pdf, fmt="pdf")
+    # Без группы — официального EPUB нет.
+    assert client.get(f"/api/library/{p}").json()["official_epub_id"] is None
+    client.post(f"/api/editions/{p}/link", json={"other_id": en})
+    client.put(f"/api/editions/{p}/meta", json={"language": "ru", "edition_label": "перевод Катаева"})
+    # В группе только английский — это другой текст, конвертировать можно.
+    assert client.get(f"/api/library/{p}").json()["official_epub_id"] is None
+    client.post(f"/api/editions/{p}/link", json={"other_id": ru})
+    client.put(f"/api/editions/{ru}/meta", json={"language": "ru", "edition_label": "перевод Катаева"})
+    assert client.get(f"/api/library/{p}").json()["official_epub_id"] == ru
+    r = client.post(f"/api/reader/{p}/convert")
+    assert r.status_code in (409, 501), r.text  # 501 — нет ebook-convert в окружении теста
+    if r.status_code == 409:
+        assert str(ru) in r.json()["detail"]
+    # Метка другого перевода — уже не «тот же текст».
+    client.put(f"/api/editions/{ru}/meta", json={"edition_label": "перевод Шелли"})
+    assert client.get(f"/api/library/{p}").json()["official_epub_id"] is None

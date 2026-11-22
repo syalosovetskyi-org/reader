@@ -317,6 +317,31 @@ def same_text(a, b) -> bool:
     return not la or not lb or la == lb
 
 
+
+# Серж 22.11.2026: «не делать конвертацию в EPUB книг, для которых есть
+# официальный EPUB-файл уже». Официальный = издание той же группы с тем же
+# текстом (same_text: язык и метка перевода) в перетекающем формате.
+FLOWING_FORMATS = {"epub", "fb2"}
+
+
+def official_epub_for(session, work):
+    """Издание-EPUB того же текста для PDF/DJVU-издания или None."""
+    from sqlmodel import select
+
+    from .db.models import Work
+
+    if not getattr(work, "edition_group_id", None):
+        return None
+    if (work.file_format or "").lower() in FLOWING_FORMATS:
+        return None
+    siblings = session.exec(
+        select(Work).where(Work.edition_group_id == work.edition_group_id, Work.id != work.id)
+    ).all()
+    for w in siblings:
+        if (w.file_format or "").lower() in FLOWING_FORMATS and w.file_path and same_text(work, w):
+            return w
+    return None
+
 def map_position(src_work, src_prog, src_fmt: str, tgt_work, tgt_fmt: str) -> dict:
     """Куда в издании-цели ставить читателя, стоявшего в src_prog.
 

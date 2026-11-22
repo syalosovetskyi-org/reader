@@ -66,11 +66,20 @@ function others(payload) {
 function currentEd(payload) {
   return (payload?.editions || []).find((e) => e.current) || null
 }
+// Порядок выбора «другого» издания (serg/tasks#3240, Серж 22.11: с EN кнопка
+// «→RU» открыла PDF Шелли, хотя он читал EPUB Катаева): сперва то, что читали
+// последним, затем перетекающий текст раньше PDF, затем оригинал.
+function rankEditions(list) {
+  const pdf = (e) => (String(e.file_format || '').toLowerCase() === 'pdf' && !e.converted ? 1 : 0)
+  return [...list].sort((a, b) =>
+    (Number(b.saved_at) || 0) - (Number(a.saved_at) || 0)
+    || pdf(a) - pdf(b)
+    || (isOriginal(b) ? 1 : 0) - (isOriginal(a) ? 1 : 0))
+}
 function otherLanguage(payload) {
   const cur = currentEd(payload)
   const list = others(payload).filter((e) => e.language && e.language !== cur?.language)
-  // Перевод → в первую очередь оригинал: кнопка читается как «Оригинал / EN».
-  return list.find(isOriginal) || list[0] || null
+  return rankEditions(list)[0] || null
 }
 
 // «Перевести на русский» не нужен, если книга уже по-русски или рядом есть
@@ -500,9 +509,8 @@ export async function openSplit(pair, lead = 0) {
   // Вторая половина — ДРУГОЕ издание: сперва на другом языке, чем у первой
   // (перевод ↔ оригинал), затем другой перевод, и только потом тот же текст
   // в другом формате. Никогда не то же самое издание (serg/tasks#3240: RU+RU).
-  const rest = eds.filter((e) => e.id !== a.id)
+  const rest = rankEditions(eds.filter((e) => e.id !== a.id))
   const b = rest.find((e) => e.id === pair?.[1])
-    || rest.find((e) => e.language && a.language && e.language !== a.language && isOriginal(e))
     || rest.find((e) => e.language && a.language && e.language !== a.language)
     || rest.find((e) => (e.edition_label || '') !== (a.edition_label || ''))
     || rest[0]

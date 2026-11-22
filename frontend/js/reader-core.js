@@ -223,7 +223,9 @@ async function openReaderImpl(work, opts = {}) {
   // Без file_format читалка не узнаёт PDF: не помнит последний формат (#1937)
   // и не показывает кнопку PDF. Его нет в строке списка, закэшированной до
   // того, как список стал его отдавать, — тогда берём деталь книги.
-  if (work.file_format == null) {
+  // У издания из группы (serg/tasks#3240) деталь знает, есть ли официальный
+  // EPUB того же текста: тогда PDF не конвертируется, а открывается как есть.
+  if (work.file_format == null || (work.edition_group_id && work.official_epub_id === undefined)) {
     try { work = { ...work, ...await api.get(`/api/library/${work.id}`) } }
     catch (e) { logErr('load work format', e) }
     if (!current()) return
