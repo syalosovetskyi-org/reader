@@ -61,6 +61,10 @@ def _keep_separately(session: Session, keep: Work, dup: Work) -> str:
     """Причина НЕ сливать dup в keep (пустая строка — сливать можно)."""
     from datetime import timedelta
 
+    # serg/tasks#3240: издания, которые человек связал, — разные книги по его
+    # решению; дедуп их не сливает и не удаляет никогда (даже стаб без файла).
+    if dup.edition_group_id or keep.edition_group_id:
+        return "связанное издание (группа изданий)"
     if not dup.file_path:
         return ""  # стаб без файла (calibre-ссылка) — сливаем как раньше
     if keep.file_path and dup.sha1 and dup.sha1 == keep.sha1:
@@ -885,7 +889,14 @@ def delete_work(work_id: int, session: Session = Depends(get_session)) -> dict:
         ).all():
             session.delete(row)
 
+    group_id = work.edition_group_id
     session.delete(work)
+    # Книга была изданием в группе: оставшееся одно издание — уже не группа.
+    if group_id:
+        from .editions import dissolve_if_single
+
+        session.flush()
+        dissolve_if_single(session, group_id)
     try:
         session.commit()
     except Exception:

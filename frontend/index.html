@@ -173,6 +173,11 @@
   <section id="reader" class="screen" hidden>
     <div id="reader-top" class="reader-bar reader-top">
       <button id="back-btn" class="icon-btn" title="К библиотеке">‹<span class="btn-label"> Библиотека</span></button>
+      <!-- Издания (serg/tasks#3240): переключатель издания и быстрый RU↔EN.
+           Видны, только когда книга связана с другими изданиями. -->
+      <button id="ed-switch" class="ed-sw" type="button" hidden
+              aria-haspopup="menu" aria-expanded="false" aria-controls="ed-menu"></button>
+      <button id="ed-quick" class="ed-quick" type="button" hidden></button>
       <!-- Заголовок-переключатель: по тапу глава → книга → автор → снова глава.
            Дефолт при открытии книги — глава (мгновенная ориентация в тексте). -->
       <button id="reader-title" class="reader-title" type="button"
@@ -186,6 +191,12 @@
         <button id="search-btn" class="icon-btn" title="Поиск по книге">🔍</button>
         <button id="settings-btn" class="icon-btn" title="Вид">Aa</button>
         <button id="fs-btn" class="icon-btn" title="Полный экран">⛶</button>
+        <!-- Широкий экран: частые действия из «Ещё» — прямо в тулбаре. -->
+        <button id="tts-wide" class="icon-btn wide-only" type="button" title="Читать вслух" aria-label="Читать вслух"></button>
+        <button id="tr-wide" class="icon-btn wide-only" type="button" title="Перевести на русский" aria-label="Перевести на русский" aria-pressed="false"></button>
+        <button id="bm-wide" class="icon-btn wide-only" type="button" title="Закладки" aria-label="Закладки"></button>
+        <button id="hl-wide" class="icon-btn wide-only" type="button" title="Подсветки и цитаты" aria-label="Подсветки и цитаты"></button>
+        <button id="split-btn" class="icon-btn" type="button" hidden title="Два издания рядом" aria-label="Два издания рядом"></button>
         <button id="more-btn" class="icon-btn" title="Ещё"
                 aria-haspopup="menu" aria-expanded="false" aria-label="Ещё">⋮</button>
       </div>
@@ -405,6 +416,23 @@
     </aside>
 
     <div id="panel-overlay" class="panel-overlay" hidden></div>
+    <!-- Меню издания: список изданий группы, «Два издания рядом», синхронизация -->
+    <div id="ed-menu" class="ed-menu" role="menu" aria-label="Издание" hidden></div>
+    <!-- Плашка «позиция из PDF» и тост переноса места поверх текста -->
+    <div id="ed-chip" class="src-chip" role="status" hidden></div>
+    <div id="ed-toast" class="ed-toast" role="status" hidden></div>
+  </section>
+
+  <!-- ======================= ДВА ИЗДАНИЯ РЯДОМ ======================= -->
+  <section id="split" class="split-screen" hidden aria-label="Два издания рядом">
+    <div class="split-tbar">
+      <button id="split-exit" class="ib" type="button" title="Выйти из режима рядом" aria-label="Выйти из режима рядом"></button>
+      <span class="sp"></span>
+      <button id="split-sync" class="ib" type="button" title="Прокручивать вместе" aria-label="Прокручивать вместе" aria-pressed="true"></button>
+      <button id="split-swap" class="ib" type="button" title="Поменять местами" aria-label="Поменять издания местами"></button>
+      <button id="split-orient" class="ib" type="button"></button>
+    </div>
+    <div id="split-body" class="split-body"></div>
   </section>
 
   <!-- Отладочные замеры окна (serg/tasks#902): без ?vpdebug=1 ничего не делает. -->

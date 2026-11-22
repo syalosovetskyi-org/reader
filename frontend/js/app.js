@@ -17,6 +17,7 @@ import './bookmarks.js'
 import './highlights.js'
 import './search.js'
 import './tts.js'
+import './editions.js'
 
 // ===================== Старт =====================
 syncSettingsUI()

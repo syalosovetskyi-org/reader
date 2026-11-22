@@ -82,6 +82,34 @@ class Work(SQLModel, table=True):
     # поиском (serg/tasks#923). Это ВИДИМОСТЬ, а не архив: файл, прогресс,
     # подписки и докачка новых глав продолжают работать как раньше.
     hidden: bool = False
+    # --- Издания одного произведения (serg/tasks#3240) ---
+    # Группа только СВЯЗЫВАЕТ книги: у каждого издания свой файл и свой
+    # прогресс, ничего не сливается (21.11 авто-слияние удалило файлы, см.
+    # _keep_separately в routers/library.py). Связь ставит человек.
+    edition_group_id: Optional[int] = Field(
+        default=None, foreign_key="edition_group.id", index=True
+    )
+    # Язык текста книги (ru, en, uk…): из opf dc:language / fb2 <lang>, иначе
+    # по самому тексту. Пусто — ещё не определяли. language_manual — человек
+    # исправил руками, пересканирование метаданных его не трогает.
+    language: str = ""
+    language_manual: bool = False
+    # Метка издания для списка изданий: «перевод Катаева», «оригинал».
+    edition_label: str = ""
+
+
+class EditionGroup(SQLModel, table=True):
+    """Группа изданий одного произведения (serg/tasks#3240).
+
+    Издания — отдельные Work со своим прогрессом; группа их только связывает.
+    sync — открытое издание встаёт на место, дочитанное в другом издании.
+    """
+
+    __tablename__ = "edition_group"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sync: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Progress(SQLModel, table=True):

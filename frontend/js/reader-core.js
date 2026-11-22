@@ -177,6 +177,18 @@ function flushPosition(opts = {}) {
   const pos = livePosition()
   if (pos) savePosition(pos, { ...opts, savedAt: turnAt })
 }
+// Записать место сейчас и дождаться, пока запись дошла до сервера. Нужна
+// переходу на другое издание (serg/tasks#3240): сервер выбирает «позицию
+// группы» по последней записи, и она должна успеть лечь до открытия цели.
+export function settlePosition() {
+  if (!currentWork) return Promise.resolve()
+  const id = currentWork.id
+  flushPosition()
+  return (progressWrites.get(id) || Promise.resolve()).catch((e) => logErr('settle position', e))
+}
+// SHA-1 открытого файла: к нему привязан CFI (для точного «Вернуть»).
+export function currentRevision() { return currentRev }
+
 export function disposeReader() {
   if (currentWork) flushPosition()
   cachedTurned = false
@@ -538,6 +550,12 @@ async function openReaderImpl(work, opts = {}) {
 
   // Подтянуть и нарисовать сохранённые подсветки (синк с сервером/Android).
   loadHighlightsWeb()
+  // Книга встала на своё место — издания (js/editions.js) решают, не перенести
+  // ли её на место из другого издания группы. prog — позиция, полученная при
+  // открытии: к этому моменту читалка могла её уже пересохранить.
+  document.dispatchEvent(new CustomEvent('reader-opened', {
+    detail: { work, prog: prog || null, fmt, view: readerView, current },
+  }))
 }
 
 function onRelocate(e) {
@@ -644,11 +662,15 @@ function bookCSS() {
     ::highlight(tts-word) { background-color: ${accent}; color: #fff; border-radius: 2px; }
   `
 }
-export function applyViewStyles(target = view) {
+// opts.work/opts.host — для второй книги разделённого экрана (serg/tasks#3240):
+// у неё своя книга и своя область, а не открытые в читалке.
+export function applyViewStyles(target = view, opts = {}) {
   if (!target || !target.renderer) return
   const r = target.renderer
+  const work = opts.work || currentWork
+  const hostEl = opts.host || $('#view-host')
   if (r.setPDFOptions && target.book?.setPDFOptions) {
-    r.setPDFOptions({ ...prefs, imageBookKey: currentWork?.id, rev: currentRev, cropURL: currentWork ? `/api/reader/${currentWork.id}/pdf-crop` : null, bg: resolvedColor('--bg'), fg: resolvedColor('--fg') }).catch(e => logErr('PDF: настройки', e))
+    r.setPDFOptions({ ...prefs, imageBookKey: work?.id, rev: opts.work ? '' : currentRev, cropURL: work ? `/api/reader/${work.id}/pdf-crop` : null, bg: resolvedColor('--bg'), fg: resolvedColor('--fg') }).catch(e => logErr('PDF: настройки', e))
   }
   // Сначала раскладка (flow/колонки), потом стили: render() триггерится атрибутами,
   // и к моменту его вызова наш bookCSS уже не перетирается лишним «paginated-кадром».
@@ -657,7 +679,7 @@ export function applyViewStyles(target = view) {
     // Ширина колонки = ширине области чтения. Раньше был floor 600 — на телефоне
     // (вьюпорт ~360) это давало колонку 600px → горизонтальный overflow и дёрганая
     // прокрутка. На десктопе clientWidth заведомо >600, поведение не меняется.
-    const w = Math.max(280, ($('#view-host')?.clientWidth || 600))
+    const w = Math.max(280, (hostEl?.clientWidth || 600))
     r.setAttribute('max-column-count', '1')
     r.setAttribute('max-inline-size', String(w))
   } else {
@@ -669,7 +691,7 @@ export function applyViewStyles(target = view) {
     // (был floor 600), в «Страницах» дефект остался незамеченным, потому что на
     // широком мониторе его не видно.
     const cols = Math.max(1, Number(prefs.columns || 1))
-    const host = Math.max(280, ($('#view-host')?.clientWidth || 600))
+    const host = Math.max(280, (hostEl?.clientWidth || 600))
     const wanted = MARGIN_INLINE[prefs.marginLevel]
     r.setAttribute('max-column-count', String(cols))
     r.setAttribute('max-inline-size', String(Math.min(wanted, Math.floor(host / cols))))
@@ -682,7 +704,7 @@ export function applyViewStyles(target = view) {
   r.setAttribute('margin', String(MARGIN_GAP[prefs.marginLevel] ?? MARGIN_GAP[2]))
   r.setAttribute('flow', prefs.flow)
   // В «Ленте» зоны тапа выключены: касание у края должно прокручивать ленту.
-  $('#view-host').dataset.flow = prefs.flow
+  if (!opts.host) $('#view-host').dataset.flow = prefs.flow
   r.setStyles?.(bookCSS())
 }
 
