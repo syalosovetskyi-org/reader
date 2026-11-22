@@ -170,10 +170,9 @@ def _unfinish_progress(session: Session, work_id: int, old_len: int, new_len: in
         return
     scaled = prog.ratio * (old_len / new_len)
     if scaled < prog.ratio:
-        from .routers.progress import JUMP_RATIO, _push_history
-
-        if prog.ratio - scaled >= JUMP_RATIO:
-            _push_history(session, prog, chapter=prog.chapter, reason="overwrite", device="server")
+        # Место то же (locator и якорь не меняются), меняется только доля —
+        # это не переход, и в историю ничего не пишем (serg/tasks#3239: строки
+        # device="server" засоряли список переходов при каждой докачке).
         prog.ratio = scaled
         session.add(prog)
 

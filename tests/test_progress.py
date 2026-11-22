@@ -151,9 +151,12 @@ def test_progress_format_migration(monkeypatch):
         conn.execute(text('CREATE TABLE progress (id INTEGER PRIMARY KEY, work_id INTEGER)'))
         conn.execute(text('INSERT INTO progress (id, work_id) VALUES (1, 1)'))
     monkeypatch.setattr(db, 'engine', engine)
-    assert ('progress', 'file_format') in db._migrate_add_columns()
+    added = db._migrate_add_columns()
+    assert {('progress', 'file_format'), ('progress', 'rev'), ('progress', 'device_id'),
+            ('progress', 'device'), ('progress', 'session_id')} <= added
     with engine.connect() as conn:
         assert conn.execute(text('SELECT file_format FROM progress')).scalar_one() == ''
+        assert conn.execute(text('SELECT rev, device_id, session_id FROM progress')).one() == (0, '', '')
     assert not db._migrate_add_columns()
 
 
@@ -179,15 +182,139 @@ def test_revision_conflict_and_replay(client):
     assert client.put(url, json={"ratio": .9, "locator": "replay", "book_rev": "old", "saved_at": 400, "replay": True}).json()["locator"] == "replay"
 
 
-def test_overwrite_chapter_and_device(client):
+def test_old_client_overwrite_ignores_chapter_change(client):
+    """Старый фронт (без session_id): строка истории — только при далёком
+    скачке доли. Смена подписи главы при обычном листании больше не пишет
+    «затёрто» на каждой границе главы (дефект 82000d5, serg/tasks#3239)."""
     wid = _upload(client, "overwrite-chapter")["id"]
     url = f"/api/progress/{wid}"
     client.put(url, json={"ratio": .5, "locator": "old", "chapter": "chapter 1", "book_rev": "revision"})
     client.put(url, headers={"User-Agent": "Mozilla Android"}, json={"ratio": .501, "locator": "next", "chapter": "chapter 2"})
-    row = client.get(url + "/history").json()[0]
-    assert (row["locator"], row["chapter"], row["reason"], row["device"], row["book_rev"]) == ("old", "chapter 1", "overwrite", "android", "revision")
+    assert client.get(url + "/history").json() == []
     client.put(url, headers={"User-Agent": "Windows NT"}, json={"ratio": .8, "locator": "jump", "chapter": "chapter 2"})
-    assert client.get(url + "/history").json()[0]["device"] == "windows"
+    row = client.get(url + "/history").json()[0]
+    # device — кто там ЧИТАЛ (запись с Android), а не кто затёр (Windows).
+    assert (row["locator"], row["chapter"], row["reason"], row["device"]) == ("next", "chapter 2", "overwrite", "android")
+
+
+# --- serg/tasks#3239: история пишется по явному переходу или по чужой ревизии ---
+
+PHONE = {"device_id": "phone-uuid", "device": "Galaxy S23 Ultra · Chrome"}
+PC = {"device_id": "pc-uuid", "device": "Windows 11 · Chrome · pc-u"}
+
+
+def _put(client, wid, *, session, base, ratio, locator, who=PC, chapter="", **extra):
+    r = client.put(f"/api/progress/{wid}", json={
+        "ratio": ratio, "locator": locator, "text_anchor": f"anchor {locator}",
+        "chapter": chapter, "session_id": session, "base_rev": base, **who, **extra,
+    })
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _history(client, wid):
+    return client.get(f"/api/progress/{wid}/history").json()
+
+
+def test_same_session_reading_through_chapters_writes_no_history(client):
+    wid = _upload(client, "3239-reading")["id"]
+    rev = None
+    for i in range(30):
+        out = _put(client, wid, session="s1", base=rev, ratio=i / 100,
+                   locator=f"cfi-{i}", chapter=f"Глава {i // 6}")
+        rev = out["rev"]
+    assert rev == 30
+    assert _history(client, wid) == []
+
+
+def test_toc_jump_is_one_row_and_idempotent(client):
+    wid = _upload(client, "3239-toc")["id"]
+    rev = _put(client, wid, session="s1", base=None, ratio=.1, locator="here")["rev"]
+    snap = {"ratio": .1, "locator": "here", "text_anchor": "anchor here", "chapter": "Глава 1",
+            "reason": "toc", "book_rev": "sha-1", "client_id": "c-1", **PC}
+    first = client.post(f"/api/progress/{wid}/history", json=snap).json()
+    _put(client, wid, session="s1", base=rev, ratio=.9, locator="far")
+    rows = _history(client, wid)
+    assert len(rows) == 1
+    assert (rows[0]["reason"], rows[0]["book_rev"], rows[0]["device"]) == ("toc", "sha-1", PC["device"])
+    again = client.post(f"/api/progress/{wid}/history", json=snap).json()
+    assert again["id"] == first["id"]
+    assert len(_history(client, wid)) == 1
+
+
+def test_two_tabs_same_device_stale_base_logs_tab(client):
+    wid = _upload(client, "3239-tabs")["id"]
+    base = _put(client, wid, session="tab-a", base=None, ratio=.1, locator="start")["rev"]
+    # Обе вкладки открыты на rev=base. Вкладка A читает дальше…
+    a = _put(client, wid, session="tab-a", base=base, ratio=.4, locator="ch40")
+    # …а нетронутая вкладка B (та же машина) листает со своего старого места.
+    b = _put(client, wid, session="tab-b", base=base, ratio=.11, locator="start+1")
+    rows = _history(client, wid)
+    assert len(rows) == 1
+    assert (rows[0]["locator"], rows[0]["reason"], rows[0]["device"]) == ("ch40", "tab", PC["device"])
+    assert b["history_id"] == rows[0]["id"] and b["applied"] is True and b["rev"] == a["rev"] + 1
+
+
+def test_phone_to_pc_fresh_base_no_row_stale_base_device_row(client):
+    wid = _upload(client, "3239-devices")["id"]
+    rev = _put(client, wid, session="ph", base=None, ratio=.3, locator="phone-30", who=PHONE)["rev"]
+    # ПК открыл книгу после телефона (GET вернул rev) — продолжение чтения.
+    rev = _put(client, wid, session="pc", base=rev, ratio=.31, locator="pc-31")["rev"]
+    assert _history(client, wid) == []
+    # Телефон читает дальше со своей устаревшей базой.
+    _put(client, wid, session="ph2", base=rev - 1, ratio=.5, locator="phone-50", who=PHONE)
+    rows = _history(client, wid)
+    assert len(rows) == 1
+    assert (rows[0]["locator"], rows[0]["reason"], rows[0]["device"]) == ("pc-31", "device", PC["device"])
+    # Обратно: ПК со старой базой — в истории место телефона с ЕГО именем.
+    _put(client, wid, session="pc", base=rev, ratio=.6, locator="pc-60")
+    top = _history(client, wid)[0]
+    assert (top["locator"], top["reason"], top["device"]) == ("phone-50", "device", PHONE["device"])
+
+
+def test_offline_replay_older_is_logged_newer_is_applied(client):
+    wid = _upload(client, "3239-offline")["id"]
+    rev = _put(client, wid, session="pc", base=None, ratio=.7, locator="pc-70", saved_at=2_000)["rev"]
+    old = _put(client, wid, session="ph", base=0, ratio=.2, locator="phone-20", who=PHONE,
+               saved_at=1_000, replay=True)
+    assert old["applied"] is False and old["locator"] == "pc-70" and old["rev"] == rev
+    rows = _history(client, wid)
+    assert (rows[0]["locator"], rows[0]["reason"], rows[0]["device"]) == ("phone-20", "offline", PHONE["device"])
+    new = _put(client, wid, session="ph", base=0, ratio=.8, locator="phone-80", who=PHONE,
+               saved_at=3_000, replay=True)
+    assert new["applied"] is True and new["locator"] == "phone-80"
+    top = _history(client, wid)[0]
+    assert (top["locator"], top["reason"], top["device"]) == ("pc-70", "device", PC["device"])
+    assert len(_history(client, wid)) == 2
+
+
+def test_same_place_from_other_session_is_not_a_jump(client):
+    wid = _upload(client, "3239-same-place")["id"]
+    rev = _put(client, wid, session="a", base=None, ratio=.4, locator="x")["rev"]
+    _put(client, wid, session="b", base=rev - 1, ratio=.4, locator="x")
+    assert _history(client, wid) == []
+
+
+def test_history_post_rejects_empty_position(client):
+    wid = _upload(client, "3239-empty")["id"]
+    r = client.post(f"/api/progress/{wid}/history", json={"reason": "toc"})
+    assert r.status_code == 422
+
+
+def test_book_growth_does_not_write_history(session):
+    from sqlmodel import select
+    from backend.app.db.models import Work, Progress, PositionHistory
+    from backend.app.services import _unfinish_progress
+
+    work = Work(title="Grow", file_path="", file_format="epub")
+    session.add(work)
+    session.commit()
+    session.add(Progress(work_id=work.id, ratio=.9, locator="x"))
+    session.commit()
+    _unfinish_progress(session, work.id, 100, 200)
+    session.commit()
+    assert session.exec(select(PositionHistory)).all() == []
+    assert session.exec(select(Progress)).one().ratio == .45
 
 
 def test_history_migration(monkeypatch):
@@ -201,7 +328,8 @@ def test_history_migration(monkeypatch):
         conn.execute(text('INSERT INTO positionhistory (id, work_id) VALUES (1, 1)'))
     monkeypatch.setattr(db, 'engine', engine)
     added = db._migrate_add_columns()
-    assert {('positionhistory', 'device'), ('positionhistory', 'book_rev')} <= added
+    assert {('positionhistory', 'device'), ('positionhistory', 'book_rev'),
+            ('positionhistory', 'device_id'), ('positionhistory', 'client_id')} <= added
     with engine.connect() as conn:
         assert conn.execute(text('SELECT device, book_rev FROM positionhistory')).one() == ('', '')
     assert not db._migrate_add_columns()
@@ -234,11 +362,19 @@ def test_revision_guard_direct(session, tmp_path, monkeypatch):
     conflict = put(ratio=.4, locator='stale', book_rev='old', saved_at=300)
     assert conflict.status_code == 409
     assert json.loads(conflict.body)['progress']['locator'] == 'phone'
-    assert put(ratio=.4, book_rev='old', saved_at=100, replay=True).locator == 'phone'
-    assert session.exec(select(PositionHistory)).all() == []
-    put(ratio=.701, locator='next', chapter='21', book_rev=rev)
+    stale = put(ratio=.4, book_rev='old', saved_at=100, replay=True)
+    assert stale['locator'] == 'phone' and stale['applied'] is False
+    # Досылка старее серверной не применена, но и не потеряна.
     row = session.exec(select(PositionHistory)).one()
-    assert (row.locator, row.book_rev, row.device, row.reason) == ('phone', rev, 'android', 'overwrite')
+    assert (row.reason, row.ratio) == ('offline', .4)
+    session.delete(row)
+    session.commit()
+    # Старый фронт: соседняя глава — не переход; далёкий скачок — строка.
+    put(ratio=.701, locator='next', chapter='21', book_rev=rev)
+    assert session.exec(select(PositionHistory)).all() == []
+    put(ratio=.9, locator='far', chapter='30', book_rev=rev)
+    row = session.exec(select(PositionHistory)).one()
+    assert (row.locator, row.book_rev, row.device, row.reason) == ('next', rev, 'android', 'overwrite')
 
 
 def test_revision_hash_cached_by_mtime(tmp_path, monkeypatch):

@@ -57,10 +57,17 @@ def import_progress(session: Session, bak_path: str | Path | None = None) -> dic
         if redoc.last_read_time <= our_ms:
             continue
         if prog:
-            from ..app.routers.progress import JUMP_RATIO, _push_history
+            from ..app.routers.progress import JUMP_RATIO, _push_history, bump_rev
 
+            # У ReadEra нет CFI — место сравнимо только долей.
             if abs(prog.ratio - redoc.ratio) >= JUMP_RATIO:
-                _push_history(session, prog, chapter=prog.chapter, reason="overwrite", device="readera")
+                _push_history(session, prog, reason="readera")
+            # Позицию сдвинули не из читалки: открытая вкладка с прежней
+            # base_rev увидит это и не затрёт место молча.
+            bump_rev(prog)
+            prog.device = "ReadEra"
+            prog.device_id = ""
+            prog.session_id = ""
             prog.text_anchor = ""
             prog.book_rev = w.sha1
             prog.chapter = ""

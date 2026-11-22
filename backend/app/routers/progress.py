@@ -23,47 +23,105 @@ router = APIRouter(prefix="/api/progress", tags=["progress"])
 # инструмент, а не архив: глубже нескольких десятков в него не заглядывают,
 # зато каждая запись стоит строки в БД на каждую книгу библиотеки.
 MAX_HISTORY = 50
-# Насколько должна измениться доля, чтобы сохранение считалось ПРЫЖКОМ, а не
-# обычным чтением. 0.005 книги — это примерно одна глава у фанфика на 200 глав:
-# листание страниц историю не засоряет, а «вкладка со страницей 1 затёрла главу
-# 100» попадает в неё гарантированно.
+# Порог доли для СТАРОГО фронта (тело PUT без session_id — закэшированный
+# service worker'ом код до serg/tasks#3239): только по нему прежнее место
+# уезжает в историю. Новый фронт сообщает о переходах сам, а смену вкладки или
+# устройства сервер узнаёт по base_rev/session_id, а не по разнице доли.
+# Временная ветка: уберём, когда старых клиентов не останется.
 JUMP_RATIO = 0.005
+
+
+def same_place(a_locator: str, a_anchor: str, b_locator: str, b_anchor: str,
+               a_ratio: float = 0.0, b_ratio: float = 0.0) -> bool:
+    """Одно ли это место книги: тот же locator или тот же текстовый якорь.
+
+    Якорь сравнивается и по префиксу: старые записи хранят 12 слов, новые — 24
+    (как sameAnchor в reader-core.js). У позиций без координат (ReadEra) —
+    по доле."""
+    if a_locator and a_locator == b_locator:
+        return True
+    if a_anchor and b_anchor and (a_anchor.startswith(b_anchor) or b_anchor.startswith(a_anchor)):
+        return True
+    if not (a_locator or a_anchor or b_locator or b_anchor):
+        return abs(float(a_ratio or 0.0) - float(b_ratio or 0.0)) < 1e-9
+    return False
+
+
+def _add_snapshot(
+    session: Session,
+    work_id: int,
+    *,
+    ratio: float,
+    locator: str,
+    text_anchor: str,
+    chapter: str,
+    reason: str,
+    device: str = "",
+    device_id: str = "",
+    book_rev: str = "",
+    client_id: str = "",
+) -> PositionHistory | None:
+    """Положить позицию в историю книги. Возвращает строку (новую или уже
+    лежащую сверху с тем же местом) либо None, если координат нет вовсе."""
+    if not (locator or text_anchor or ratio):
+        return None  # пустая позиция: возвращаться в неё некуда
+    last = session.exec(
+        select(PositionHistory)
+        .where(PositionHistory.work_id == work_id)
+        .order_by(PositionHistory.created_at.desc(), PositionHistory.id.desc())
+    ).first()
+    # То же место подряд — не новая позиция, а повтор: она уже есть в истории,
+    # значит и не потеряна.
+    if last and same_place(last.locator, last.text_anchor, locator, text_anchor,
+                           last.ratio, ratio):
+        return last
+    row = PositionHistory(
+        work_id=work_id,
+        ratio=float(ratio or 0.0),
+        locator=locator or "",
+        text_anchor=text_anchor or "",
+        chapter=chapter or "",
+        reason=reason,
+        device=device or "",
+        device_id=device_id or "",
+        book_rev=book_rev or "",
+        client_id=client_id or "",
+    )
+    session.add(row)
+    session.flush()
+    _trim_history(session, work_id)
+    return row
 
 
 def _push_history(
     session: Session,
     prog: Progress,
     *,
-    chapter: str = "",
-    reason: str = "jump",
-    device: str = "",
-) -> None:
-    """Сохранить ТЕКУЩУЮ позицию в историю (до того, как её перезапишут)."""
-    if not (prog.locator or prog.text_anchor or prog.ratio):
-        return  # пустая позиция: возвращаться в неё некуда
-    last = session.exec(
-        select(PositionHistory)
-        .where(PositionHistory.work_id == prog.work_id)
-        .order_by(PositionHistory.created_at.desc(), PositionHistory.id.desc())
-    ).first()
-    # Тот же locator подряд — это не новый переход, а повтор.
-    if (last and reason != "overwrite"
-            and last.locator == prog.locator and last.text_anchor == prog.text_anchor
-            and last.ratio == prog.ratio and last.chapter == chapter):
-        return
-    session.add(
-        PositionHistory(
-            work_id=prog.work_id,
-            ratio=float(prog.ratio or 0.0),
-            locator=prog.locator or "",
-            text_anchor=prog.text_anchor or "",
-            chapter=chapter,
-            reason=reason,
-            device=device,
-            book_rev=prog.book_rev,
-        )
+    chapter: str | None = None,
+    reason: str,
+    device: str | None = None,
+) -> PositionHistory | None:
+    """Сохранить ТЕКУЩУЮ позицию Progress в историю (до того, как её перезапишут).
+
+    device по умолчанию — имя того, кто ЧИТАЛ это место (prog.device), а не
+    того, кто его сдвинул."""
+    return _add_snapshot(
+        session,
+        prog.work_id,
+        ratio=float(prog.ratio or 0.0),
+        locator=prog.locator or "",
+        text_anchor=prog.text_anchor or "",
+        chapter=prog.chapter if chapter is None else chapter,
+        reason=reason,
+        device=prog.device if device is None else device,
+        device_id=prog.device_id or "",
+        book_rev=prog.book_rev or "",
     )
-    _trim_history(session, prog.work_id)
+
+
+def bump_rev(prog: Progress) -> None:
+    """Позицию сдвинули — следующая запись с прежней base_rev будет чужой."""
+    prog.rev = int(prog.rev or 0) + 1
 
 
 def _trim_history(session: Session, work_id: int) -> None:
@@ -87,14 +145,20 @@ class ProgressIn(BaseModel):
     # SHA-1 открытого файла: CFI точен только для него (см. Progress.book_rev).
     book_rev: str = ""
     file_format: str = ""
-    # Момент сохранения на клиенте, мс от эпохи.
+    # Момент ПЕРЕЛИСТЫВАНИЯ на клиенте, мс от эпохи (не момент отправки).
     saved_at: int = 0
     # Читалка показала последнюю страницу книги.
     at_end: bool = False
-    # Досылка позиции, сохранённой без сети: принимается, только если она новее
-    # сохранённой на сервере — иначе старый офлайн-хвост затёр бы место,
-    # дочитанное с другого устройства.
+    # Досылка позиции, сохранённой без сети: старее серверной — не применяется,
+    # но и не пропадает (строка offline в истории).
     replay: bool = False
+    # Опознание писателя (serg/tasks#3239). Пустой session_id — старый фронт.
+    session_id: str = ""
+    device_id: str = ""
+    device: str = ""
+    # Ревизия Progress.rev, от которой клиент читал. None — не знает (старый
+    # фронт или позиция не загрузилась).
+    base_rev: int | None = None
 
 
 class HistoryIn(BaseModel):
@@ -105,6 +169,12 @@ class HistoryIn(BaseModel):
     text_anchor: str = ""
     chapter: str = ""
     reason: str = "jump"
+    # SHA-1 файла, в котором посчитан locator: возврат по CFI точен только в нём.
+    book_rev: str = ""
+    device: str = ""
+    device_id: str = ""
+    # Идемпотентность: повтор с тем же client_id возвращает уже лежащую строку.
+    client_id: str = ""
 
 
 def effective_ratio(prog: Progress, chapters_now: int) -> float:
@@ -209,13 +279,36 @@ def get_progress(work_id: int, session: Session = Depends(get_session)) -> Progr
     return prog
 
 
+def _progress_out(prog: Progress, *, applied: bool, snapshot: PositionHistory | None) -> dict:
+    """Ответ PUT: позиция сервера + применена ли запись + id снимка истории."""
+    out = jsonable_encoder(prog)
+    out["applied"] = applied
+    out["history_id"] = snapshot.id if snapshot is not None else None
+    return out
+
+
+def _ua_family(request: Request) -> str:
+    """Семейство ОС по User-Agent — только для старого фронта без имени устройства."""
+    ua = request.headers.get("user-agent", "").lower()
+    families = [("android", "android"), ("iphone", "ios"), ("ipad", "ios"),
+                ("windows", "windows"), ("macintosh", "macos"), ("linux", "linux")]
+    return next((name for token, name in families if token in ua), "unknown")
+
+
 @router.put("/{work_id}")
 def set_progress(
     work_id: int,
     body: ProgressIn,
     request: Request,
     session: Session = Depends(get_session),
-) -> Progress:
+):
+    """Записать позицию чтения.
+
+    Переход (оглавление, сноска, поиск…) клиент кладёт в историю сам, через
+    POST /history. Здесь история пишется, только когда позицию за спиной
+    клиента сдвинули: его base_rev устарела, вкладка другая и место другое.
+    Тогда прежняя позиция уезжает в историю с подписью, где её читали.
+    """
     work = session.get(Work, work_id)
     if not work:
         raise HTTPException(404, "work not found")
@@ -224,8 +317,6 @@ def set_progress(
 
     saved_at = int(body.saved_at or 0) or int(_time.time() * 1000)
     prog = session.exec(select(Progress).where(Progress.work_id == work_id)).first()
-    if prog and body.replay and saved_at <= int(prog.saved_at or 0):
-        return prog  # устаревшая досылка: на сервере уже позиция новее
     rev = file_rev(work)
     if (prog and not body.replay and body.book_rev and rev
             and body.book_rev != rev and prog.book_rev == rev):
@@ -233,19 +324,33 @@ def set_progress(
             status_code=409,
             content={"progress": jsonable_encoder(prog), "file_rev": rev},
         )
+    snapshot: PositionHistory | None = None
     if prog:
-        # Позицию вот-вот перезапишут. Если новая далеко от старой — это не
-        # чтение, а прыжок (или затирание чужой вкладкой, открытой в начале
-        # книги): прежнее место уезжает в историю, чтобы «Назад» в читалке
-        # было куда нажимать.
-        jumped = (abs(float(prog.ratio or 0.0) - float(body.ratio)) >= JUMP_RATIO
-                  or bool(body.chapter and prog.chapter != body.chapter))
-        if jumped:
-            ua = request.headers.get("user-agent", "").lower()
-            families = [("android", "android"), ("iphone", "ios"), ("ipad", "ios"),
-                        ("windows", "windows"), ("macintosh", "macos"), ("linux", "linux")]
-            device = next((name for token, name in families if token in ua), "unknown")
-            _push_history(session, prog, chapter=prog.chapter, reason="overwrite", device=device)
+        here = same_place(prog.locator, prog.text_anchor, body.locator, body.text_anchor,
+                          prog.ratio, body.ratio)
+        if body.replay and saved_at < int(prog.saved_at or 0) and not here:
+            # Офлайн-хвост старее серверной позиции: затирать её нельзя, но и
+            # молча выбросить нельзя — кладём в историю, откуда можно вернуться.
+            snapshot = _add_snapshot(
+                session, work_id, ratio=body.ratio, locator=body.locator,
+                text_anchor=body.text_anchor, chapter=body.chapter, reason="offline",
+                device=body.device, device_id=body.device_id, book_rev=body.book_rev,
+            )
+            session.commit()
+            session.refresh(prog)
+            return _progress_out(prog, applied=False, snapshot=snapshot)
+        if body.session_id:
+            fresh = (bool(prog.session_id) and prog.session_id == body.session_id) or (
+                body.base_rev is not None and body.base_rev == int(prog.rev or 0))
+            if not fresh and not here:
+                reason = "tab" if prog.device_id and prog.device_id == body.device_id else "device"
+                snapshot = _push_history(session, prog, reason=reason)
+        elif abs(float(prog.ratio or 0.0) - float(body.ratio)) >= JUMP_RATIO:
+            # Старый фронт (нет session_id): прежнее правило по доле, но без
+            # условия про смену главы — оно писало строку на каждой границе главы.
+            snapshot = _push_history(session, prog, reason="overwrite",
+                                     device=prog.device or _ua_family(request))
+        far = abs(float(prog.ratio or 0.0) - float(body.ratio)) >= JUMP_RATIO
         prog.ratio = body.ratio
         # Координаты пишутся ОДНОЙ тройкой. Раньше пустой якорь оставлял
         # прежний — и строка склеивалась из двух страниц: CFI новой, якорь
@@ -257,9 +362,8 @@ def set_progress(
         prog.file_format = body.file_format
         # Глава пришла — пишем. Пришла пустая (обложка, титул или
         # релокейт без tocItem) — сохраняем прежнюю подпись ТОЛЬКО пока читают
-        # то же место. При прыжке прежняя глава уже не про эту позицию —
-        # лучше пустая подпись, чем чужая.
-        if body.chapter or jumped:
+        # рядом. Далеко ушли — прежняя глава уже не про эту позицию.
+        if body.chapter or far:
             prog.chapter = body.chapter
         prog.last_read_time = utcnow()
         prog.chapters_at_read = int(work.chapters_count or 0)
@@ -279,6 +383,10 @@ def set_progress(
             source="web",
         )
         session.add(prog)
+    prog.session_id = body.session_id
+    prog.device_id = body.device_id
+    prog.device = body.device or ("" if body.session_id else _ua_family(request))
+    bump_rev(prog)
     # «Дочитано» ставится только фактом последней страницы и не снимается
     # перелистыванием назад (перечитать любимую главу — не «не дочитал»).
     # Снимают его новые главы: finished_chapters < chapters_count.
@@ -292,7 +400,9 @@ def set_progress(
     session.add(work)
     session.commit()
     session.refresh(prog)
-    return prog
+    if snapshot is not None:
+        session.refresh(snapshot)
+    return _progress_out(prog, applied=True, snapshot=snapshot)
 
 
 @router.get("/{work_id}/history")
@@ -316,19 +426,26 @@ def add_history(
     body: HistoryIn,
     session: Session = Depends(get_session),
 ) -> PositionHistory:
-    """Положить позицию в историю (читалка зовёт это перед прыжком)."""
+    """Положить позицию в историю (читалка зовёт это после явного перехода —
+    оглавление, сноска, поиск…). Повтор с тем же client_id — та же строка."""
     if not session.get(Work, work_id):
         raise HTTPException(404, "work not found")
-    row = PositionHistory(
-        work_id=work_id,
-        ratio=body.ratio,
-        locator=body.locator,
-        text_anchor=body.text_anchor,
-        chapter=body.chapter,
-        reason=body.reason or "jump",
+    if body.client_id:
+        seen = session.exec(
+            select(PositionHistory)
+            .where(PositionHistory.work_id == work_id)
+            .where(PositionHistory.client_id == body.client_id)
+        ).first()
+        if seen:
+            return seen
+    row = _add_snapshot(
+        session, work_id, ratio=body.ratio, locator=body.locator,
+        text_anchor=body.text_anchor, chapter=body.chapter,
+        reason=body.reason or "jump", device=body.device, device_id=body.device_id,
+        book_rev=body.book_rev, client_id=body.client_id,
     )
-    session.add(row)
-    _trim_history(session, work_id)
+    if row is None:
+        raise HTTPException(422, "позиция без координат: locator, text_anchor и ratio пусты")
     session.commit()
     session.refresh(row)
     return row
