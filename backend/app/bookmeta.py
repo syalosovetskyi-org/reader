@@ -163,6 +163,23 @@ _FB2_PREFIXES = (
 )
 
 
+# Коды языка из метаданных книг: ISO 639-1 (ru), 639-2 (rus), с регионом
+# (en-US). Приводим к двум буквам — так их сравнивает группа изданий
+# (serg/tasks#3240). «und»/«zxx» — «не определён», это не язык.
+_LANG3 = {"rus": "ru", "eng": "en", "ukr": "uk", "bel": "be", "deu": "de", "ger": "de",
+          "fra": "fr", "fre": "fr", "spa": "es", "ita": "it", "pol": "pl", "jpn": "ja",
+          "zho": "zh", "chi": "zh", "kor": "ko", "por": "pt"}
+
+
+def norm_lang(code: str | None) -> str:
+    c = (code or "").strip().lower().replace("_", "-").split("-", 1)[0]
+    if not c or c in ("und", "zxx", "mul", "xx"):
+        return ""
+    if len(c) == 3:
+        return _LANG3.get(c, "")
+    return c if len(c) == 2 and c.isalpha() else ""
+
+
 def _fb2_genre_label(code: str) -> str:
     code = (code or "").strip().lower().replace("-", "_")
     if not code:
@@ -210,6 +227,9 @@ def _fb2_meta(path: str) -> dict:
     seq_num = re.search(r"<sequence\b[^>]*number=\"([\d.]+)\"", scope, re.I)
     series_index = int(float(seq_num.group(1))) if seq_num else 0
 
+    lang_m = re.search(r"<lang>\s*([^<\s]+)\s*</lang>", scope, re.I)
+    language = norm_lang(lang_m.group(1)) if lang_m else ""
+
     kw = re.search(r"<keywords>(.*?)</keywords>", scope, re.S | re.I)
     if kw:
         for k in re.split(r"[,;]", unescape(re.sub(r"<[^>]+>", "", kw.group(1)))):
@@ -227,6 +247,8 @@ def _fb2_meta(path: str) -> dict:
         out["series"] = fandom
     if series_index:
         out["series_index"] = series_index
+    if language:
+        out["language"] = language
     return out
 
 
@@ -285,7 +307,11 @@ def extract_epub_meta(epub_path: str | Path) -> dict:
     if msi:
         series_index = int(float(msi.group(1)))
 
+    language = next((norm_lang(v) for v in _tag_values(opf, "dc:language") if norm_lang(v)), "")
+
     out: dict = {"meta_synced": True}
+    if language:
+        out["language"] = language
     if description:
         out["description"] = description
     if tags:
@@ -308,7 +334,7 @@ def apply_meta(work, meta: dict, *, overwrite: bool = False) -> bool:
     Возвращает True, если что-то изменилось."""
     changed = False
     for key, val in meta.items():
-        if key in ("title", "author") and getattr(work, f"{key}_manual", False):
+        if key in ("title", "author", "language") and getattr(work, f"{key}_manual", False):
             continue
         if not hasattr(work, key):
             continue

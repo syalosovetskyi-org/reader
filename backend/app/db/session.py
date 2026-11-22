@@ -54,6 +54,7 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     added = _migrate_add_columns()
+    _ensure_edition_index()
     _backfill_content_updated_at()
     if ("progress", "finished_at") in added:
         _backfill_finished()
@@ -96,6 +97,29 @@ def _migrate_add_columns() -> set[tuple[str, str]]:
                 )
                 added.add((table.name, col.name))
     return added
+
+
+def _ensure_edition_index() -> None:
+    """Индекс work.edition_group_id для уже существующей таблицы work.
+
+    create_all заводит индексы только у таблиц, которые создаёт сам, а ALTER
+    из _migrate_add_columns добавляет одну колонку. Индекс ставим точечно, а не
+    «все недостающие разом»: среди старых есть уникальные, и их внезапное
+    создание на живых данных могло бы уронить старт сервиса (serg/tasks#3240).
+    """
+    from .models import Work
+
+    for idx in Work.__table__.indexes:
+        if idx.name == "ix_work_edition_group_id":
+            idx.create(bind=engine, checkfirst=True)
+            return
+    # Индекса с таким именем нет в модели — значит, его переименовали; молча
+    # пропустить нельзя, иначе группа изданий читалась бы полным перебором.
+    import logging
+
+    logging.getLogger("reader.db").warning(
+        "индекс work.edition_group_id не найден в модели — миграция индекса пропущена"
+    )
 
 
 def _backfill_finished() -> None:
