@@ -1,57 +1,89 @@
 // История переходов по книге: кнопка «Назад» в читалке и список позиций по
-// долгому нажатию (serg/tasks#1078).
+// долгому нажатию (serg/tasks#1078, переписано в serg/tasks#3239).
 //
-// Зачем: позиция чтения — ОДНА строка на книгу (Progress), её перезаписывает
-// любой релокейт. Книга открыта в двух вкладках, во второй она стоит на первой
-// странице — её сохранение затирает главу 100, и вернуться некуда. То же самое
-// делает любой прыжок: по оглавлению, по ссылке-сноске, перемоткой шкалы.
+// Переход решает только клиент, по явному действию человека: оглавление,
+// сноска, поиск, закладка, шкала, глава ±1 не с последней страницы главы,
+// Ctrl+Home/End, клик в этой панели, открытие на главе со страницы книги.
+// Все они идут через navigate(reason, go) — см. core/jump-stack.js.
+// Обычное листание, в том числе через границу главы, — не переход.
 //
-// Две памяти, намеренно:
-//  * локальный стек этой вкладки — мгновенный «Назад» без сети, LIFO;
-//  * серверная история (/api/progress/{id}/history) — переживает перезагрузку
-//    вкладки и видна с другого устройства; туда же сервер САМ кладёт позицию,
-//    которую затёрла чужая вкладка (см. backend/app/routers/progress.py).
+// Две памяти:
+//  * локальный стек этой вкладки — «Назад» без сети, LIFO;
+//  * серверная история (/api/progress/{id}/history) — переживает
+//    перезагрузку и видна с другого устройства. Туда же сервер сам кладёт
+//    место, сдвинутое другой вкладкой или устройством (backend/app/routers/progress.py).
 import { $, escapeHtml, toast } from './core/dom.js'
 import { api } from './core/api.js'
 import { logErr } from './core/log.js'
-import { view, currentWork, lastCfi, lastAnchor, lastFraction } from './core/state.js'
-import { chapterTitle } from './chrome.js'
-import { gotoPosition } from './core/position.js'
+import { view, currentWork } from './core/state.js'
+import { gotoPosition, captureAnchor } from './core/position.js'
+import { createJumpStack, isEmptyPos } from './core/jump-stack.js'
+import { identity, deviceId } from './core/device.js'
 
-// Глубже этого локальный стек не растёт: «Назад» — рабочий инструмент на
-// несколько шагов, а не журнал чтения. Дальше — серверная история.
-const MAX_LOCAL = 50
-
-// Тот же порог, что у сервера (JUMP_RATIO в backend/app/routers/progress.py):
-// насколько должна измениться доля, чтобы сохранение считалось прыжком и
-// прежняя позиция уехала в историю. Держим копию, потому что решение сервера
-// ответом PUT не возвращается, а кнопка «Назад» обязана ожить сразу.
-const JUMP_RATIO = 0.005
-
-let stack = []          // прыжки этой вкладки, новые в конце
-let savedRatio = 0      // доля, которую сервер видел в прошлом сохранении
 let serverHasRows = false  // знает ли сервер о прошлых позициях этой книги
+let bookRevNow = ''        // SHA-1 открытого файла: возврат по CFI точен только в нём
+let formatNow = ''
 
-// Текущая позиция читалки в том же виде, в каком её хранит сервер.
+// Текущая позиция живой читалки в том виде, в каком её хранит сервер.
 function currentPosition() {
+  const loc = view?.lastLocation
+  if (!loc) return null
+  const me = identity()
   return {
-    ratio: lastFraction || 0,
-    locator: lastCfi || '',
-    text_anchor: lastAnchor || '',
-    chapter: chapterTitle(),
+    ratio: loc.fraction || 0,
+    locator: loc.cfi || '',
+    text_anchor: captureAnchor(loc.range) || '',
+    chapter: loc.tocItem?.label || '',
+    book_rev: bookRevNow,
+    device: me.device,
+    device_id: me.device_id,
   }
 }
 
-function isEmpty(pos) {
-  return !pos || (!pos.locator && !pos.text_anchor && !pos.ratio)
+// Дождаться relocate после перехода. goTo у foliate обычно эмитит его внутри
+// себя; таймаут — на переход «в то же место», после которого relocate нет.
+function settle(ms = 700) {
+  const v = view
+  if (!v) return Promise.resolve()
+  return new Promise((resolve) => {
+    let t = null
+    const done = () => { clearTimeout(t); v.removeEventListener('relocate', on); resolve() }
+    const on = () => setTimeout(done, 60)
+    v.addEventListener('relocate', on)
+    t = setTimeout(done, ms)
+  })
 }
 
-// Кнопка «Назад» активна, только когда есть куда возвращаться: неактивная
-// кнопка честнее пустой панели после нажатия.
+const jumps = createJumpStack({
+  current: currentPosition,
+  settle,
+  goTo: async (pos) => {
+    if (!view) return false
+    const ok = await gotoPosition(view, pos, bookRevNow, formatNow)
+    if (!ok) toast('Это место в книге больше не находится — возможно, её пересобрали', 'err')
+    return ok
+  },
+  post: (row) => {
+    const id = currentWork?.id
+    if (!id) return null
+    serverHasRows = true
+    syncBackBtn()
+    return api.post(`/api/progress/${id}/history`, row)
+  },
+  loadRows: () => {
+    const id = currentWork?.id
+    return id ? api.get(`/api/progress/${id}/history`) : []
+  },
+  newId: () => (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+  onChange: () => syncBackBtn(),
+  onError: (what, e) => logErr(what, e),
+})
+
+// Кнопка «Назад» активна, только когда есть куда возвращаться.
 function syncBackBtn() {
   const btn = $('#jump-back-btn')
   if (!btn) return
-  const can = stack.length > 0 || serverHasRows
+  const can = jumps.size > 0 || (serverHasRows && !jumps.seeded)
   btn.disabled = !can
   btn.title = can
     ? 'Вернуться к прошлой позиции (удерживайте — список переходов)'
@@ -59,9 +91,10 @@ function syncBackBtn() {
 }
 
 // Вызывается при открытии книги: стек чужой книги к новой отношения не имеет.
-export async function resetJumps(workId, startRatio = 0) {
-  stack = []
-  savedRatio = startRatio || 0
+export async function resetJumps(workId, { bookRev = '', format = '' } = {}) {
+  jumps.reset()
+  bookRevNow = bookRev || ''
+  formatNow = format || ''
   serverHasRows = false
   syncBackBtn()
   if (!workId) return
@@ -76,121 +109,63 @@ export async function resetJumps(workId, startRatio = 0) {
   syncBackBtn()
 }
 
-// Сохранение прогресса ушло далеко от прошлого сохранения — значит сервер сам
-// положил прежнюю позицию в историю (в том числе когда её затёрла эта вкладка,
-// открытая в начале книги). Кнопке «Назад» есть что предложить.
-//
-// Считаем именно по сохранениям: соседние релокейты во время восстановления
-// позиции прыгают сами по себе, и по ним кнопка зажигалась на пустой истории.
-export function noteProgressSaved(ratio) {
-  const jumped = Math.abs(savedRatio - (ratio || 0)) >= JUMP_RATIO
-  savedRatio = ratio || 0
-  if (!jumped || serverHasRows) return
-  serverHasRows = true
-  syncBackBtn()
+// Единственная точка входа для переходов. reason попадает в подпись строки.
+export function navigate(reason, go, opts) {
+  if (!view) return Promise.resolve('failed')
+  return jumps.navigate(reason, go, opts)
 }
 
-// Запомнить ТЕКУЩУЮ позицию перед прыжком. reason: jump | toc | search |
-// bookmark | seek | link — попадает в подпись строки в списке.
-export function recordJump(reason = 'jump') {
-  const pos = currentPosition()
-  if (isEmpty(pos)) return
-  const last = stack[stack.length - 1]
-  if (last && last.locator === pos.locator && last.text_anchor === pos.text_anchor) return
-  stack.push({ ...pos, reason, created_at: new Date().toISOString(), local: true })
-  if (stack.length > MAX_LOCAL) stack.shift()
-  syncBackBtn()
-  const id = currentWork?.id
-  if (!id) return
-  serverHasRows = true
-  api.post(`/api/progress/${id}/history`, { ...pos, reason })
-    .catch((e) => logErr('не сохранил переход в историю', e))
+// Открыли книгу сразу на главе: исход — серверная позиция, на экране её не было.
+export function rememberOrigin(pos, reason = 'open') {
+  if (isEmptyPos(pos)) return null
+  const me = identity()
+  return jumps.remember({
+    ratio: pos.ratio || 0, locator: pos.locator || '', text_anchor: pos.text_anchor || '',
+    chapter: pos.chapter || '', book_rev: pos.book_rev || '',
+    device: pos.device || me.device, device_id: pos.device_id || me.device_id,
+  }, reason)
 }
 
-// Положить позицию в серверную историю и тут же оживить кнопку «Назад».
-// Отдельная функция, потому что писать в историю умеет не только этот модуль:
-// читалка кладёт сюда позицию, с которой ушла, открываясь на выбранной главе.
-export function pushServerJump(pos, reason = 'jump') {
-  if (isEmpty(pos)) return Promise.resolve()
-  const id = currentWork?.id
-  if (!id) return Promise.resolve()
-  serverHasRows = true
-  syncBackBtn()
-  return api.post(`/api/progress/${id}/history`, {
-    ratio: pos.ratio || 0,
-    locator: pos.locator || '',
-    text_anchor: pos.text_anchor || '',
-    chapter: pos.chapter || '',
-    reason,
-  }).catch((e) => logErr('не сохранил переход в историю', e))
+// Вкладка устарела и её не трогали: переходим на свежее место, своё кладём
+// в локальный стек (на сервер не пишем — это место и так было серверной
+// позицией, а у сервера оно уже в истории или продолжено) и говорим, откуда.
+export async function followRemote(prog) {
+  const reason = prog.device_id && prog.device_id === deviceId() ? 'tab' : 'device'
+  const res = await jumps.navigate(reason, () => gotoPosition(view, prog, bookRevNow, formatNow), { post: false })
+  if (res !== 'failed') toast(`Продолжаю с ${prog.device || 'другого устройства'}`, 'info', 4000)
+  return res
 }
 
-// Перейти к сохранённой позиции. record=true — текущую позицию тоже положить
-// в историю (чтобы из любой точки списка можно было вернуться обратно).
-async function goToPos(pos, { record = true } = {}) {
-  if (!view) return false
-  if (isEmpty(pos)) {
-    // Запись без координат — возвращаться некуда. Молчание здесь
-    // читалось бы как сломанная кнопка.
-    toast('Эта запись без координат — переходить некуда', 'err')
-    return false
-  }
-  if (record) {
-    const cur = currentPosition()
-    const id = currentWork?.id
-    if (!isEmpty(cur) && id) {
-      api.post(`/api/progress/${id}/history`, { ...cur, reason: 'back' })
-        .catch((e) => logErr('не сохранил обратный переход', e))
-      serverHasRows = true
-    }
-  }
-  const ok = await gotoPosition(view, pos)
-  if (!ok) toast('Это место в книге больше не находится — возможно, её пересобрали', 'err')
-  return ok
-}
-
-// Кнопка «Назад»: сначала прыжки этой вкладки (мгновенно), потом серверная
-// история — в ней лежит и позиция, затёртая другой вкладкой.
 export async function jumpBack() {
-  const local = stack.pop()
-  syncBackBtn()
-  if (local) return goToPos(local)
-
-  const id = currentWork?.id
-  if (!id) return false
-  let rows = []
-  try {
-    rows = await api.get(`/api/progress/${id}/history`)
-  } catch (e) {
-    logErr('история переходов не загрузилась', e)
-    toast('Не удалось получить историю переходов', 'err')
-    return false
-  }
-  const cur = currentPosition()
-  // Первая запись, которая не совпадает с тем, где мы стоим сейчас: иначе
-  // «Назад» никуда не ведёт и выглядит сломанным.
-  const target = (rows || []).find(
-    (r) => r.locator !== cur.locator || r.text_anchor !== cur.text_anchor,
-  )
-  serverHasRows = (rows || []).length > 0
-  syncBackBtn()
-  if (!target) {
-    toast('Возвращаться некуда — переходов по этой книге не было', 'info')
-    return false
-  }
-  return goToPos(target)
+  const target = await jumps.back()
+  if (!target) toast('Возвращаться некуда — переходов по этой книге не было', 'info')
+  return target
 }
 
 const REASONS = {
   toc: 'оглавление',
+  link: 'сноска',
   search: 'поиск',
+  seek: 'шкала',
   bookmark: 'закладка',
-  seek: 'перемотка',
-  link: 'ссылка',
-  open: 'открытие книги',
+  open: 'открыто с главы',
+  chapter: 'следующая глава',
+  edge: 'край книги',
+  jumps: 'список переходов',
+  tab: 'другая вкладка',
+  offline: 'офлайн-досылка',
+  merge: 'слияние дублей',
+  readera: 'ReadEra',
+  // Старые записи до serg/tasks#3239: сервер угадывал «затирание» по доле и
+  // ставил его на каждую границу главы — это просто прежнее место.
+  overwrite: 'прежнее место',
   back: 'возврат',
-  overwrite: 'затёрто другой вкладкой',
   jump: 'переход',
+}
+
+export function reasonLabel(r) {
+  if (r.reason === 'device') return `другое устройство: ${r.device || 'неизвестное'}`
+  return REASONS[r.reason] || r.reason || ''
 }
 
 function fmtWhen(iso) {
@@ -208,7 +183,7 @@ function fmtWhen(iso) {
   return d.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
-// Список для панели: серверная история + локальные прыжки, без дублей.
+// Список для панели: локальные прыжки + серверная история, без дублей.
 async function jumpList() {
   const id = currentWork?.id
   let rows = []
@@ -221,10 +196,12 @@ async function jumpList() {
   }
   const seen = new Set()
   const all = []
-  for (const r of [...stack].reverse().concat(rows)) {
-    const key = `${r.locator}|${r.text_anchor}|${Math.round((r.ratio || 0) * 1000)}`
-    if (seen.has(key)) continue
-    seen.add(key)
+  for (const r of jumps.entries().reverse().concat(rows)) {
+    if (r.reason === 'back') continue
+    const key = r.client_id || `${r.locator}|${r.text_anchor}|${Math.round((r.ratio || 0) * 1000)}`
+    const place = `${r.locator}|${r.text_anchor}|${Math.round((r.ratio || 0) * 1000)}`
+    if (seen.has(key) || seen.has(place)) continue
+    seen.add(key); seen.add(place)
     all.push(r)
   }
   return all
@@ -237,8 +214,8 @@ export async function renderJumpsPanel() {
   const rows = await jumpList()
   if (!rows.length) {
     list.innerHTML = '<div class="jumps-empty">Переходов по этой книге ещё не было.'
-      + ' Сюда попадают места, из которых вы ушли: по оглавлению, по ссылке,'
-      + ' перемоткой — и позиция, затёртая другой вкладкой.</div>'
+      + ' Сюда попадают места, из которых вы ушли: по оглавлению, по сноске,'
+      + ' поиском, шкалой — и место, где читали в другой вкладке или на другом устройстве.</div>'
     return
   }
   list.innerHTML = ''
@@ -247,15 +224,20 @@ export async function renderJumpsPanel() {
     a.href = '#'
     a.className = 'jump-item'
     const pct = Math.round((r.ratio || 0) * 100)
+    const where = r.device && r.reason !== 'device' ? ' · ' + escapeHtml(r.device) : ''
     a.innerHTML = `<span class="jump-ch">${escapeHtml(r.chapter || 'Без главы')}</span>`
-      + `<span class="jump-meta">${pct}% · ${escapeHtml(REASONS[r.reason] || r.reason || '')}`
+      + `<span class="jump-meta">${pct}% · ${escapeHtml(reasonLabel(r))}${where}`
       + `${r.created_at ? ' · ' + escapeHtml(fmtWhen(r.created_at)) : ''}</span>`
     a.addEventListener('click', async (ev) => {
       ev.preventDefault()
       const { closePanels } = await import('./navigation.js')
       closePanels()
-      // Уходим из текущего места — оно тоже должно попасть в историю.
-      await goToPos(r)
+      if (isEmptyPos(r)) {
+        toast('Эта запись без координат — переходить некуда', 'err')
+        return
+      }
+      // Уход из текущего места по списку — тоже переход.
+      await navigate('jumps', () => gotoPosition(view, r, bookRevNow, formatNow))
     })
     list.append(a)
   }
@@ -263,7 +245,6 @@ export async function renderJumpsPanel() {
 
 export async function clearJumps() {
   const id = currentWork?.id
-  stack = []
   if (id) {
     try {
       await api.delete(`/api/progress/${id}/history`)
@@ -273,32 +254,17 @@ export async function clearJumps() {
       return
     }
   }
+  jumps.reset()
   serverHasRows = false
   syncBackBtn()
   renderJumpsPanel()
 }
 
 // Кнопка в тулбаре: короткое нажатие — назад, долгое — список переходов.
-// Долгое нажатие, а не вторая кнопка: тулбар уже плотный, а список нужен реже.
 const LONG_PRESS_MS = 520
 const MOVE_TOL = 12
 
-// Вкладку показали снова — за время в фоне в книге могли появиться новые
-// прошлые позиции (их кладёт сервер, когда эту позицию кто-то затёр).
-async function refreshFromServer() {
-  const id = currentWork?.id
-  if (!id || document.hidden) return
-  try {
-    const rows = await api.get(`/api/progress/${id}/history`)
-    serverHasRows = Array.isArray(rows) && rows.length > 0
-    syncBackBtn()
-  } catch (e) {
-    logErr('история переходов не обновилась', e)
-  }
-}
-
 export function initJumps() {
-  document.addEventListener('visibilitychange', refreshFromServer)
   const btn = $('#jump-back-btn')
   if (!btn) return
   let timer = null
@@ -335,8 +301,7 @@ export function initJumps() {
     if (longFired) { longFired = false; return }
     jumpBack()
   })
-  // Клавиатура: список переходов без долгого нажатия (его пальцем не изобразишь
-  // на Tab-навигации) — Alt+стрелка вниз, как у комбобокса.
+  // Клавиатура: список переходов без долгого нажатия — Alt+стрелка вниз.
   btn.addEventListener('keydown', (e) => {
     if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); openList() }
   })

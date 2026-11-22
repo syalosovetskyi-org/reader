@@ -71,6 +71,9 @@ CLEAN = """async () => {
   localStorage.removeItem('reader.pendingProgress.v1')
   await new Promise(r => { const q = indexedDB.open('reader-resume-v1', 1); q.onsuccess = () => { const t = q.result.transaction('windows', 'readwrite'); t.objectStore('windows').clear(); t.oncomplete = t.onerror = () => { q.result.close(); r() } }; q.onerror = r })
 }"""
+# Действие человека: позиция пишется только после него (serg/tasks#3239).
+# Программные goTo/next в шагах ниже изображают его листание.
+HUMAN = "() => window.dispatchEvent(new PointerEvent('pointerdown'))"
 REOPEN = """async work => {
   const m = await import('/js/reader-core.js')
   await m.openReader(work)
@@ -177,6 +180,7 @@ async def main():
         print('STEP 3', flush=True)
         # --- 3. at_end только на последней странице ---
         state['puts'].clear()
+        await page.evaluate(HUMAN)
         await page.evaluate(f"async () => {{ const v=(await import('/js/core/state.js')).view; await v.goTo('c{CHAPTERS - 1}.xhtml'); await v.next(); await new Promise(r=>setTimeout(r,1500)) }}")
         mid = state['puts'][-1]
         assert mid['at_end'] is False, ('середина последней главы — не прочитано', mid)
@@ -199,6 +203,7 @@ async def main():
         print('STEP 5', flush=True)
         # --- 5. офлайн-позиция досылается и открывается ---
         state['fail_put'] = True
+        await page.evaluate(HUMAN)
         await page.evaluate("async () => { const v=(await import('/js/core/state.js')).view; await v.goTo('c3.xhtml'); await v.next(); await new Promise(r=>setTimeout(r,1500)) }")
         pending = await page.evaluate("() => JSON.parse(localStorage.getItem('reader.pendingProgress.v1') || '{}')['1']")
         assert pending and pending['body']['locator'], ('без сети позиция должна остаться в очереди', pending)
