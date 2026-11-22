@@ -96,6 +96,9 @@ async def run(flow='paginated', font='system'):
         await page.wait_for_function("() => window.readerState.view?.lastLocation?.cfi")
         await page.wait_for_timeout(3000)
         # Move close enough to a chapter boundary that the cache crosses chapters.
+        # Позиция пишется только после действия человека (serg/tasks#3239) —
+        # программное листание ниже изображает его.
+        await page.evaluate("() => window.dispatchEvent(new PointerEvent('pointerdown'))")
         await page.evaluate("async () => { const s = await import('/js/core/state.js'); await s.view.goTo('c1.xhtml'); await s.view.next(); await s.view.next() }")
         initial = await page.evaluate("async () => (await import('/vendor/foliate-js/epubcfi.js')).collapse((await import('/js/core/state.js')).view.lastLocation.cfi)")
         window = None

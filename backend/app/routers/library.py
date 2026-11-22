@@ -242,12 +242,13 @@ def _dedup_works(session: Session) -> int:
                         dup_ts = dup_prog.last_read_time or utcnow()
                         keep_ts = keep_prog.last_read_time or utcnow()
                         if dup_ts > keep_ts or (dup_prog.saved_at or 0) > (keep_prog.saved_at or 0):
-                            from .progress import JUMP_RATIO, _push_history
+                            from .progress import _push_history, bump_rev, same_place
 
-                            if (abs(keep_prog.ratio - dup_prog.ratio) >= JUMP_RATIO
-                                    or keep_prog.chapter != dup_prog.chapter):
-                                _push_history(session, keep_prog, chapter=keep_prog.chapter,
-                                              reason="overwrite", device="server")
+                            if not same_place(keep_prog.locator, keep_prog.text_anchor,
+                                              dup_prog.locator, dup_prog.text_anchor,
+                                              keep_prog.ratio, dup_prog.ratio):
+                                _push_history(session, keep_prog, reason="merge")
+                            bump_rev(keep_prog)
                             keep_prog.ratio = dup_prog.ratio
                             keep_prog.locator = dup_prog.locator
                             keep_prog.text_anchor = dup_prog.text_anchor

@@ -1,8 +1,9 @@
 // Поиск по книге (foliate view.search).
 import { $, escapeHtml } from './core/dom.js'
 import { view } from './core/state.js'
+import { logErr } from './core/log.js'
 import { closePanels } from './navigation.js'
-import { recordJump } from './jumps.js'
+import { navigate } from './jumps.js'
 
 // ===================== Поиск по книге =====================
 // foliate view.search() — асинхронный генератор: по секциям выдаёт совпадения
@@ -58,6 +59,10 @@ function searchResult(label, sub) {
     `<span class="sr-ex">${escapeHtml(ex.pre || '')}<mark>${escapeHtml(ex.match || '')}</mark>${escapeHtml(ex.post || '')}</span>`
   // Переход к найденному — прыжок: место, из которого искали, должно
   // остаться в истории переходов (serg/tasks#1078).
-  a.addEventListener('click', (ev) => { ev.preventDefault(); recordJump('search'); view.goTo(sub.cfi); closePanels() })
+  a.addEventListener('click', (ev) => {
+    ev.preventDefault()
+    navigate('search', () => view.goTo(sub.cfi)).catch((e) => logErr('переход к найденному не удался', e))
+    closePanels()
+  })
   return a
 }

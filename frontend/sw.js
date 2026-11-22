@@ -35,6 +35,7 @@ const FALLBACK_PRECACHE = [
   '/js/core/locator.js', '/js/core/convert.js', '/js/core/inline-images.js',
   '/js/core/fullscreen.js', '/js/core/menu-autohide.js', '/js/core/reader-url.js',
   '/js/core/book-range.js', '/js/core/remote-images.js',
+  '/js/jumps.js', '/js/core/jump-stack.js', '/js/core/device.js', '/js/core/progress-sync.js',
 ]
 
 // Что класть в офлайн-кэш оболочки. Сервер считает список сам (все .js, стили,

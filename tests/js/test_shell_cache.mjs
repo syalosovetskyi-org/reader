@@ -16,8 +16,8 @@ const self = {
   addEventListener: (name, fn) => { handlers[name] = fn },
 }
 const context = vm.createContext({ self, URL, Response, setTimeout, clearTimeout,
-  caches: { open: async name => { assert.equal(name, 'reader-shell-v15'); return cache },
-    keys: async () => ['reader-shell-v12', 'reader-shell-v15', 'reader-books-v1', 'reader-recent-books-v1', 'reader-pdf-chunks-v1'],
+  caches: { open: async name => { assert.equal(name, 'reader-shell-v16'); return cache },
+    keys: async () => ['reader-shell-v12', 'reader-shell-v16', 'reader-books-v1', 'reader-recent-books-v1', 'reader-pdf-chunks-v1'],
     delete: async name => removed.push(name) },
   fetch: async req => {
     if (offline) throw Error('нет сети')

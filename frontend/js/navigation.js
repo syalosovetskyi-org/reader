@@ -15,7 +15,7 @@ import { initChrome, attachDoubleTapFullscreen, toggleFullscreen,
 import { initTranslate, onTranslateDocLoaded } from './translate.js'
 import { exitFullscreen, exitMeansBack, takeButtonExit } from './core/fullscreen.js'
 import { keyNavAction } from './core/keynav.js'
-import { initJumps } from './jumps.js'
+import { initJumps, navigate } from './jumps.js'
 import { renameBook } from './book-identity.js'
 import { turnResume } from './core/resume-cache.js'
 
@@ -45,6 +45,15 @@ $('#back-btn').addEventListener('click', () => {
 window.addEventListener('popstate', () => {
   if (!$('#reader').hidden) closeReader()
 })
+// Стоим на последней странице текущей главы? Тогда «следующая глава» — то же
+// самое, что перелистнуть страницу, и переходом не считается (serg/tasks#3239:
+// «нет, если я в конце главы и листаю на следующую страницу в новую главу»).
+function atSectionEnd() {
+  const r = view?.renderer
+  if (!r || view.isFixedLayout) return false
+  if (r.scrolled) return r.end >= r.viewSize - 2
+  return typeof r.page === 'number' && r.page >= r.pages - 2
+}
 // Между главами: всегда в НАЧАЛО целевой главы, в любом режиме.
 async function gotoChapterStart(dir) {
   if (!view) return
@@ -52,7 +61,15 @@ async function gotoChapterStart(dir) {
   if (lastIdx == null) { dir > 0 ? view.next() : view.prev(); return }
   const target = lastIdx + dir
   if (target < 0) return
-  try { await view.goTo(String(target)) } catch { dir > 0 ? view.next() : view.prev() }
+  const go = async () => {
+    try { await view.goTo(String(target)) } catch (e) {
+      console.warn('глава ±1: переход по индексу не удался, листаю страницу', e)
+      await (dir > 0 ? view.next() : view.prev())
+    }
+  }
+  // С последней страницы вперёд — обычное перелистывание; иначе — переход.
+  if (dir > 0 && atSectionEnd()) { await go(); return }
+  await navigate('chapter', go)
 }
 // Шаг листания в «Ленте»: чуть МЕНЬШЕ экрана, чтобы строка, разрезанная краем
 // экрана, не терялась: она целиком уезжает наверх следующего экрана. Перекрытие
@@ -103,7 +120,10 @@ function handleKey(e) {
   if (!action) return
   if (action === 'prev') goPrev()
   else if (action === 'next') goNext()
-  else gotoEdge(action)
+  else if (action === 'bookStart' || action === 'bookEnd') {
+    // Ctrl+Home/End — переход: «Назад» вернёт туда, где читали.
+    navigate('edge', () => gotoEdge(action)).catch((err) => console.warn('keynav: край книги', err))
+  } else gotoEdge(action)
   e.preventDefault()
 }
 // Home/End — края ТЕКУЩЕЙ главы, с Ctrl — края КНИГИ (serg/tasks#996).

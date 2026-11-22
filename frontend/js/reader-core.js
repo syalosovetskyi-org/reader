@@ -11,7 +11,8 @@ import { view, currentWork, lastCfi, libMonitored, libUpdated, navStack,
          setView, setCurrentWork, setLastCfi, setLastAnchor, setLastIdx,
          setLastFraction } from './core/state.js'
 import { restorePosition, captureAnchor, gotoPosition, bookRev, positionForFormat } from './core/position.js'
-import { commitPosition, pendingFor, serverSavedAt, replayPending } from './core/progress-sync.js'
+import { commitPosition, pendingFor, serverSavedAt, replayPending, noteRev, knownRev } from './core/progress-sync.js'
+import { sessionId } from './core/device.js'
 import { inlineImagesOnLoad } from './core/inline-images.js'
 import { ttsSt, ttsStop, ttsReadPage } from './tts.js'
 import { loadHighlightsWeb, onDrawAnnotation, hideSelPopup } from './highlights.js'
@@ -24,7 +25,8 @@ import { setBookMeta, setChapterTitle, setMoreBadge } from './chrome.js'
 import { onTranslateRelocate, resetTranslate } from './translate.js'
 import { readerUrl } from './core/reader-url.js'
 import { convertible, pdfAsEpub, ensureEpub, convertStatus, formatSwitchTarget, readingFormat, formatRecord, newerReadingFormat, localReadingFormat, storeReadingFormat } from './core/convert.js'
-import { resetJumps, recordJump, pushServerJump, noteProgressSaved } from './jumps.js'
+import { resetJumps, navigate, rememberOrigin, followRemote } from './jumps.js'
+import { samePos } from './core/jump-stack.js'
 import { collapse } from '../vendor/foliate-js/epubcfi.js'
 import { chapterDate } from './core/chapterdate.js'
 import { showResume, hideResume, stopResume, resumePosition, resumeBasePosition, layoutSettled,
@@ -88,11 +90,18 @@ async function fetchBookFile(url, alive, headers = {}) {
     return r
   }, (e) => TRANSIENT.has(e?.status) || e instanceof TypeError, alive)
 }
-// Серверная позиция НЕ пришла, книга открыта с начала: пока человек сам
-// ничего не сделал в читалке, ничего не пишем — иначе начало книги затёрло бы
-// сохранённое место. Ждём именно действия человека: CFI и доля после открытия
-// меняются и без него (раскладка, переход к началу текста).
-let holdSaves = false
+// Пока человек сам ничего не сделал в читалке, позицию не пишем (serg/tasks#3239):
+// CFI и доля после открытия меняются и без него (раскладка, переход к началу
+// текста, переход вкладки на свежее место). Раньше открытая и нетронутая
+// вкладка сразу писала своё место — и сервер видел в этом «затирание».
+// Особенно важно, когда серверная позиция не пришла: начало книги затёрло бы
+// сохранённое место. Снимает запрет любое действие человека (USER_INPUT).
+let holdSaves = true
+// Место сдвинулось после действия человека, но ещё не ушло в savePosition
+// (окно дебаунса). Уход в фон сбрасывает только его.
+let unsaved = false
+// Момент перелистывания — он, а не момент отправки, уходит в saved_at.
+let turnAt = 0
 let recoveringRevision = false
 document.addEventListener('reader-revision-conflict', async (event) => {
   if (currentWork?.id !== Number(event.detail.workId) || recoveringRevision) return
@@ -127,7 +136,8 @@ function savePosition(pos, opts = {}) {
   if (holdSaves || recoveringRevision) return
   const id = currentWork.id
   const body = { book_rev: currentRev, file_format: currentFormat, ...pos }
-  const savedAt = Date.now()
+  const savedAt = opts.savedAt || Date.now()
+  unsaved = false
   const revision = currentRev
   if (opts.keepalive) { commitPosition(id, body, { ...opts, savedAt }); return }
   const write = (progressWrites.get(id) || Promise.resolve())
@@ -163,8 +173,9 @@ function flushPosition(opts = {}) {
     if (cached && cachedTurned) savePosition({ ...cached, book_rev: '' }, { ...opts, replay: true })
     return
   }
+  if (!unsaved) return  // ничего не меняли — писать нечего
   const pos = livePosition()
-  if (pos) savePosition(pos, opts)
+  if (pos) savePosition(pos, { ...opts, savedAt: turnAt })
 }
 export function disposeReader() {
   if (currentWork) flushPosition()
@@ -229,7 +240,8 @@ async function openReaderImpl(work, opts = {}) {
   setMoreBadge('')
 
   // Позицию запрашиваем сразу, но локальный режим открывает кеш без сети.
-  holdSaves = false
+  holdSaves = true
+  unsaved = false
   const progP = (progressWrites.get(work.id) || Promise.resolve())
     .then(() => withRetry(() => api.get(`/api/progress/${work.id}`), transientErr, current))
     .catch(e => { logErr('load progress', e); return null })
@@ -425,6 +437,21 @@ async function openReaderImpl(work, opts = {}) {
     for (const ev of USER_INPUT) e.detail?.doc?.addEventListener(ev, releaseHold, { capture: true, passive: true })
   })
   view.addEventListener('load', inlineImagesOnLoad)
+  // Внутренняя ссылка (сноска pandoc и пр.): foliate сам сделал бы goTo, и
+  // место ухода нигде не запоминалось. Отменяем его переход и идём сами,
+  // через navigate — тогда «Назад» вернёт к тексту, а обратная ссылка из
+  // сноски снимет запись, а не добавит новую.
+  view.addEventListener('link', (e) => {
+    e.preventDefault()
+    const href = e.detail?.href
+    if (!href) return
+    // Клик мышью фокусирует ссылку, и paginator по focusin (через кадр)
+    // прокручивает к ней — то есть обратно на страницу, откуда ушли. Ждём два
+    // кадра, чтобы этот скролл случился ДО перехода, а не после.
+    const frame = () => new Promise((r) => requestAnimationFrame(() => r()))
+    navigate('link', async () => { await frame(); await frame(); return view.goTo(href) })
+      .catch((err) => logErr(`переход по ссылке ${href} не удался`, err))
+  })
   view.addEventListener('draw-annotation', onDrawAnnotation)
   currentRev = await revP
   applyViewStyles()
@@ -437,6 +464,8 @@ async function openReaderImpl(work, opts = {}) {
   let prog = opts.serverProgress || await progP
   currentRev = await revP
   if (!current()) return
+  // Ревизия, от которой эта вкладка читает: её несёт каждый PUT (base_rev).
+  noteRev(work.id, prog?.rev)
   // Неотправленная позиция (закрыли без сети, PWA убили до PUT) новее
   // серверной — она и есть место, где остановились. Досылаем её же.
   const pend = pendingFor(work.id)
@@ -456,14 +485,17 @@ async function openReaderImpl(work, opts = {}) {
   // Позиция, с которой книга открывается, — точка отсчёта для признака прыжка:
   // иначе первый же релокейт после восстановления выглядел бы скачком с нуля.
   setLastFraction(prog?.ratio || 0)
-  await resetJumps(work.id, prog?.ratio || 0)
+  await resetJumps(work.id, { bookRev: currentRev, format: fmt })
   if (!current()) return
   if (opts.jump) {
     // Пришли из оглавления на странице книги: открываем НЕ сохранённую
     // позицию, а выбранную главу. Сохранённую кладём в историю переходов —
     // иначе клик по главе стирал бы место, с которого человек читал.
-    pushServerJump(prog, 'open')
     await openAtChapter(view, opts.jump)
+    if (!current()) return
+    rememberOrigin(prog, 'open')
+    // Глава выбрана человеком — это его действие, место пишем сразу.
+    holdSaves = false
   } else if (samePosition && cachedTarget) {
     await readerView.init({ lastLocation: cachedTarget.locator })
   } else {
@@ -537,16 +569,19 @@ function onRelocate(e) {
   const atEnd = isAtEnd(e.detail)
   // Дебаунс-сохранение прогресса на сервер (доля + CFI + текстовый якорь).
   // Потерь от дебаунса нет: уход вкладки/закрытие пишут место немедленно.
+  // Без действия человека (holdSaves) не пишем вовсе.
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    if (!currentWork) return
-    // Далёкое от прошлого сохранения место = сервер положит прежнее в историю
-    // переходов; кнопка «Назад» должна ожить сразу (serg/tasks#1078).
-    noteProgressSaved(fraction || 0)
-    savePosition(
-      { ratio: fraction || 0, locator: cfi || '', text_anchor: anchor || '',
-        chapter: tocItem?.label || '', at_end: atEnd })
-  }, atEnd ? 0 : 900)
+  if (!holdSaves && !recoveringRevision) {
+    unsaved = true
+    turnAt = Date.now()
+    const savedAt = turnAt
+    saveTimer = setTimeout(() => {
+      if (!currentWork) return
+      savePosition(
+        { ratio: fraction || 0, locator: cfi || '', text_anchor: anchor || '',
+          chapter: tocItem?.label || '', at_end: atEnd }, { savedAt })
+    }, atEnd ? 0 : 900)
+  }
   if (ttsSt.advance) { ttsSt.advance = false; setTimeout(() => { if (ttsSt.active) ttsReadPage() }, 350) }
   // Дочитан до последней страницы — сбросить флаг обновления.
   if (atEnd && currentWork && libUpdated.has(currentWork.id)) {
@@ -749,10 +784,10 @@ function buildTOC() {
       if (!sub) _firstToc = false
       a.addEventListener('click', (ev) => {
         ev.preventDefault()
-        // Уход по оглавлению — прыжок: откуда ушли, туда должно возвращать
+        // Уход по оглавлению — переход: откуда ушли, туда должно возвращать
         // «Назад» в тулбаре (serg/tasks#1078).
-        recordJump('toc')
-        if (_isFirst) view.goToFraction(0); else view.goTo(it.href)
+        navigate('toc', () => (_isFirst ? view.goToFraction(0) : view.goTo(it.href)))
+          .catch((e) => logErr('переход по оглавлению не удался', e))
         closePanels()
       })
       list.append(a)
@@ -772,6 +807,38 @@ function onLeave() {
 window.addEventListener('pagehide', onLeave)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') onLeave()
+  else checkRemote('visible')
 })
+window.addEventListener('online', () => { checkRemote('online') })
+
+// Вкладку показали снова / вернулась сеть: место могли сдвинуть в другой
+// вкладке или на другом устройстве (serg/tasks#3239). Если ЭТУ вкладку с тех
+// пор не трогали — переходим на свежее место, своё кладём в «Назад» и
+// говорим, откуда продолжаем. Трогали (есть несохранённое) — остаёмся: первая
+// же запись со старой base_rev положит чужое место в историю на сервере.
+let checkingRemote = false
+export async function checkRemote(why = '') {
+  const work = currentWork
+  if (!work || !view || opening || checkingRemote || document.hidden || $('#reader')?.hidden) return
+  checkingRemote = true
+  try {
+    let prog
+    try { prog = await api.get(`/api/progress/${work.id}`) } catch (e) {
+      logErr(`свежая позиция не загрузилась (${why})`, e)
+      return
+    }
+    if (currentWork !== work || opening || !view || typeof prog?.rev !== 'number') return
+    if (prog.rev === knownRev(work.id)) return
+    const touched = unsaved || pendingFor(work.id) || progressWrites.has(work.id)
+    if (prog.session_id && prog.session_id === sessionId) { noteRev(work.id, prog.rev); return }
+    if (touched) return
+    const here = livePosition()
+    noteRev(work.id, prog.rev)
+    if (here && samePos(here, prog)) return
+    clearTimeout(saveTimer)
+    holdSaves = true  // переход сделала программа, а не человек
+    await followRemote(prog)
+  } finally { checkingRemote = false }
+}
 // Досылка позиций, не ушедших в прошлый раз (сеть, убитая вкладка).
 replayPending()

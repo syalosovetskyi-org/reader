@@ -11,7 +11,7 @@
 // текущую долю для закладок и подсветок ($('#progress-slider').value).
 import { $ } from './core/dom.js'
 import { view } from './core/state.js'
-import { recordJump } from './jumps.js'
+import { navigate } from './jumps.js'
 
 // Единый «бюджет жестов» приложения: те же порог удержания и допуск на дрожь
 // используются для двойного тапа по центру экрана (см. js/chrome.js).
@@ -206,7 +206,13 @@ function onUp(e) {
   cancelHold()
   // Перемотка шкалой — прыжок: прежнее место уезжает в историю переходов,
   // иначе промах пальцем стирает позицию без возможности вернуться.
-  if (wasArmed && view) { recordJump('seek'); curFrac = f; paint(f); view.goToFraction(f) }
+  if (wasArmed && view) { curFrac = f; paint(f); seek(f) }
+}
+
+// Перемотка шкалой — переход (serg/tasks#3239): «Назад» вернёт на прежнее место.
+function seek(f) {
+  const v = view
+  navigate('seek', () => v.goToFraction(f)).catch((e) => console.warn('шкала: перемотка не удалась', e))
 }
 
 export function initProgressBar() {
@@ -227,7 +233,6 @@ export function initProgressBar() {
     else if (e.key === 'End') target = 1
     if (target == null) return
     e.preventDefault(); e.stopPropagation()
-    recordJump('seek')
-    curFrac = target; paint(target); view.goToFraction(target)
+    curFrac = target; paint(target); seek(target)
   })
 }
