@@ -400,9 +400,11 @@ function setLead(i) {
 
 function onHalfRelocate(i, detail) {
   S.last[i] = detail
-  // Первые relocate — от открытия половины, а не от листания: ведущую не меняют.
-  if (S.syncing || !S.ready[i]) return
-  setLead(i)
+  // Ведущую назначает только действие человека в половине (pointerdown/wheel/
+  // touchstart/keydown — см. loadHalf), а не relocate: по таймерам ведомая
+  // половина под нагрузкой успевала «стать ведущей», и половины перехватывали
+  // ведущую друг у друга. Здесь — только «ведомая идёт следом за ведущей».
+  if (S.syncing || !S.ready[i] || i !== S.lead) return
   if (S.sync) followLead()
 }
 

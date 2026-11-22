@@ -129,8 +129,10 @@ async def main():
         report['wide_icons'] = True
 
         # --- 1. EN: середина главы 4 → быстрый переход на RU ---
+        # serg/tasks#3239: позиция пишется только после действия человека —
+        # сначала «касание», потом листание (как у position_restore.py HUMAN).
+        await page.evaluate("() => window.dispatchEvent(new PointerEvent('pointerdown'))")
         await page.evaluate("async () => { const v = (await import('/js/core/state.js')).view; await v.goTo('c3.xhtml'); await v.next(); await v.next() }")
-        await page.mouse.click(640, 400)  # действие человека: позиция пишется
         await page.wait_for_timeout(1500)
         own_ru = None
         quick = await page.inner_text('#ed-quick')
@@ -154,6 +156,7 @@ async def main():
         assert own_ru['label'] != 'Глава 4', ('«Вернуть» не вернул', own_ru)
         report['undo'] = own_ru['label']
         # Обратно в главу 4 для разделённого экрана.
+        await page.evaluate("() => window.dispatchEvent(new PointerEvent('pointerdown'))")
         await page.evaluate("async () => { const v = (await import('/js/core/state.js')).view; await v.goTo('c3.xhtml') }")
         await wait_label(page, ru, 'Глава 4')
 
@@ -167,6 +170,9 @@ async def main():
         lead_tag = await page.inner_text('#split-body .col.is-lead .tag')
         assert 'RU' in lead_tag, lead_tag
         # Листаем вторую (EN) — она становится ведущей, RU идёт следом.
+        # Действие человека во второй половине делает её ведущей (не relocate).
+        await page.evaluate("""() => { const v = document.querySelectorAll('#split foliate-view')[1]
+            for (const c of v.renderer.getContents()) c.doc.dispatchEvent(new PointerEvent('pointerdown')) }""")
         await page.evaluate("async () => { const v = document.querySelectorAll('#split foliate-view')[1]; await v.goTo('c4.xhtml') }")
         await page.wait_for_function("() => document.querySelectorAll('#split foliate-view')[0].lastLocation?.tocItem?.label === 'Глава 5'", timeout=8000)
         assert 'EN' in await page.inner_text('#split-body .col.is-lead .tag')
