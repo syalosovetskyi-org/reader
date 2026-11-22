@@ -496,8 +496,17 @@ export async function openSplit(pair, lead = 0) {
   closeMenu(); hideToast(); hideChip()
   const eds = group.editions
   const a = eds.find((e) => e.id === pair?.[0]) || currentEd(group)
-  const b = eds.find((e) => e.id === pair?.[1] && e.id !== a.id) || otherLanguage(group) || others(group)[0]
-  if (!a || !b) return
+  if (!a) return
+  // Вторая половина — ДРУГОЕ издание: сперва на другом языке, чем у первой
+  // (перевод ↔ оригинал), затем другой перевод, и только потом тот же текст
+  // в другом формате. Никогда не то же самое издание (serg/tasks#3240: RU+RU).
+  const rest = eds.filter((e) => e.id !== a.id)
+  const b = rest.find((e) => e.id === pair?.[1])
+    || rest.find((e) => e.language && a.language && e.language !== a.language && isOriginal(e))
+    || rest.find((e) => e.language && a.language && e.language !== a.language)
+    || rest.find((e) => (e.edition_label || '') !== (a.edition_label || ''))
+    || rest[0]
+  if (!b) return
   S.pair = [a, b]; S.lead = lead; S.menu = null; S.gen++
   const gen = S.gen
   document.body.classList.add('split-open')
@@ -755,6 +764,11 @@ function wire() {
   })
   let rz = null
   window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (!$('#split').hidden) { paintTags(); relayoutHalves() } }, 200) })
+  document.addEventListener('reader-opening', () => {
+    // Новая книга: прежний список изданий больше не про неё.
+    group = null
+    try { closeSplit(); paintToolbar(null) } catch (err) { logErr('editions: сброс при открытии', err) }
+  })
   document.addEventListener('reader-opened', (e) => { onReaderOpened(e).catch((err) => logErr('editions: открытие издания', err)) })
 }
 

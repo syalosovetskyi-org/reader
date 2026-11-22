@@ -216,6 +216,10 @@ async function openReaderImpl(work, opts = {}) {
   opening = true
   originalFile = false
   const current = () => generation === openGeneration
+  // Издания (js/editions.js) сбрасывают список изданий прежней книги СРАЗУ:
+  // открытие может ждать конвертацию PDF минутами, и всё это время тулбар и
+  // «два издания рядом» не должны считать текущей прошлую книгу (serg/tasks#3240).
+  document.dispatchEvent(new CustomEvent('reader-opening', { detail: { work } }))
   // Без file_format читалка не узнаёт PDF: не помнит последний формат (#1937)
   // и не показывает кнопку PDF. Его нет в строке списка, закэшированной до
   // того, как список стал его отдавать, — тогда берём деталь книги.
