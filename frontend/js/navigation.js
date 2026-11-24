@@ -211,6 +211,8 @@ export function attachKeysToDoc(e) {
     }, { passive: true })
     e.detail.doc.addEventListener('touchend', (ev) => {
             if (!view || (view.isFixedLayout && view.renderer?.scrolled)) return
+      // Щипок (масштаб PDF, js/pdf-zoom.js) — не свайп по страницам.
+      if (ev.touches.length || Date.now() < (view.renderer?.pinchUntil || 0)) return
       const t = ev.changedTouches[0]
       const dx = t.clientX - _sx, dy = t.clientY - _sy
       if (Date.now() - _st > 900) return
