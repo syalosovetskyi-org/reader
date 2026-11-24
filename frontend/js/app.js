@@ -18,6 +18,7 @@ import './highlights.js'
 import './search.js'
 import './tts.js'
 import './editions.js'
+import './pdf-zoom.js'
 
 // ===================== Старт =====================
 syncSettingsUI()

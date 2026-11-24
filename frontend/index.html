@@ -183,6 +183,14 @@
       <button id="reader-title" class="reader-title" type="button"
               data-mode="chapter" title="Глава / книга / автор"></button>
       <div class="reader-top-actions">
+        <!-- Масштаб PDF (serg/tasks#3274): только у книг-макетов. На узком экране
+             кнопок нет — там щипок; число остаётся, если масштаб не по умолчанию. -->
+        <span id="pdf-zoom" class="pdf-zoom" role="group" aria-label="Масштаб страницы" hidden>
+          <button id="pdf-zoom-out" class="pdf-zoom-btn" type="button" title="Уменьшить (Ctrl −)" aria-label="Уменьшить">−</button>
+          <button id="pdf-zoom-val" class="pdf-zoom-val" type="button" title="Масштаб страницы"
+                  aria-haspopup="menu" aria-expanded="false" aria-controls="pdf-zoom-menu">По ширине</button>
+          <button id="pdf-zoom-in" class="pdf-zoom-btn" type="button" title="Увеличить (Ctrl +)" aria-label="Увеличить">+</button>
+        </span>
         <button id="reader-format-btn" class="icon-btn" type="button" hidden></button>
         <button id="jump-back-btn" class="icon-btn" type="button" disabled
                 title="Переходов пока не было"
@@ -396,6 +404,7 @@
         </select>
       </div>
     </aside>
+    <div id="pdf-zoom-menu" class="pdf-zoom-menu" role="menu" aria-label="Масштаб страницы" hidden></div>
     <!-- Меню «Ещё»: редкие действия, снятые с верхней панели -->
     <aside id="more-panel" class="panel" hidden>
       <div class="panel-head">Ещё</div>

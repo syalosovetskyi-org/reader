@@ -64,6 +64,31 @@ export class FixedLayout extends HTMLElement {
     #center
     #side
     #zoom
+    #scale = 1          // масштаб текущей страницы, как он вышел после раскладки
+    #zoomKey = ''       // каким был #zoom при прошлой раскладке ленты
+    #pinch = null
+    pinchUntil = 0      // до этого момента касания — щипок, а не свайп (navigation.js)
+    // Перерисовка страницы под масштаб. Новый масштаб заменяет frame.pending,
+    // и прежняя отрисовка остаётся без обработчика: если книгу в это время
+    // закрыли (pdf.js уже разобран), её отказ всплывал бы ошибкой страницы.
+    // Отказ пишем в консоль с контекстом; сама страница перерисуется следующим вызовом.
+    #zoomFrame(frame, doc, scale) {
+        const p = frame.onZoom({ doc, scale })
+        p?.catch?.(error => {
+            if (frame.iframe?.isConnected) console.warn('PDF: страница не перерисовалась под масштаб', scale, error)
+        })
+        return p
+    }
+    // Масштаб, которым сейчас показана страница (единицы страницы → CSS px).
+    get currentScale() { return this.#scale }
+    // Ширина страницы ленты при текущем масштабе.
+    #stripPageWidth(size, viewWidth, viewHeight) {
+        const z = this.#zoom
+        if (typeof z === 'number' && !isNaN(z) && z > 0) return size.width * z
+        if (z === 'fit-page' && size.height > 0)
+            return Math.min(viewWidth, viewHeight * size.width / size.height)
+        return viewWidth
+    }
     constructor() {
         super()
 
@@ -73,8 +98,10 @@ export class FixedLayout extends HTMLElement {
             width: 100%;
             height: 100%;
             display: flex;
-            justify-content: center;
-            align-items: center;
+            /* safe: страница крупнее окна (масштаб) прокручивается, а не
+               обрезается слева и сверху, как при обычном center. */
+            justify-content: safe center;
+            align-items: safe center;
             overflow: auto;
         }`)
 
@@ -186,13 +213,14 @@ export class FixedLayout extends HTMLElement {
                             left.height ?? blankHeight,
                             right.height ?? blankHeight)))
             ) || 1
+        this.#scale = scale
 
         const transform = frame => {
             let { element, iframe, width, height, blank, onZoom } = frame
             const doc = iframe?.contentDocument
             // При закрытии книги фрейм уже может быть отсоединён.
             if (!iframe?.isConnected || !doc) return
-            if (onZoom) frame.pending = onZoom({ doc, scale })
+            if (onZoom) frame.pending = this.#zoomFrame(frame, doc, scale)
             const iframeScale = onZoom ? scale : 1
             Object.assign(iframe.style, {
                 width: `${width * iframeScale}px`,
@@ -370,11 +398,54 @@ export class FixedLayout extends HTMLElement {
     // Колесо из iframe передаём контейнеру; касания используют нативную цепочку прокрутки.
     #attachScrollInput(doc) {
         doc.addEventListener('wheel', e => {
-            if (!this.scrolled || e.ctrlKey) return
+            // Ctrl + колесо (и щипок тачпада, он приходит так же) — масштаб
+            // страницы, а не всего окна браузера вместе с панелями.
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault()
+                this.dispatchEvent(new CustomEvent('zoom-request', { detail: { wheel: e.deltaY } }))
+                return
+            }
+            if (!this.scrolled) return
             e.preventDefault()
             this.scrollBy(0, e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.clientHeight : 1))
         }, { passive: false })
         doc.addEventListener('keydown', e => this.handleScrollKey(e))
+        this.#attachPinch(doc)
+    }
+    // Щипок двумя пальцами: пока пальцы на экране — превью трансформацией,
+    // отпустили — один запрос масштаба (перерисовка страниц PDF дорогая).
+    #attachPinch(doc) {
+        const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+        const target = () => this.scrolled ? this.#strip : this.#root.firstElementChild
+        doc.addEventListener('touchstart', e => {
+            if (e.touches.length !== 2) return
+            const d = dist(e.touches)
+            if (d < 10) return
+            const host = this.getBoundingClientRect()
+            const frame = doc.defaultView.frameElement?.getBoundingClientRect() ?? host
+            const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 + frame.left
+            const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 + frame.top
+            this.#pinch = { d, ratio: 1, el: target(), ox: cx - host.left + this.scrollLeft, oy: cy - host.top + this.scrollTop }
+            this.pinchUntil = Infinity
+        }, { passive: true })
+        doc.addEventListener('touchmove', e => {
+            const p = this.#pinch
+            if (!p || e.touches.length !== 2) return
+            e.preventDefault() // иначе браузер масштабирует всю страницу
+            p.ratio = Math.max(0.3, Math.min(4, dist(e.touches) / p.d))
+            if (p.el) Object.assign(p.el.style, { transform: `scale(${p.ratio})`, transformOrigin: this.scrolled ? `${p.ox}px ${p.oy}px` : 'center' })
+        }, { passive: false })
+        const end = e => {
+            const p = this.#pinch
+            if (!p || e.touches.length > 1) return
+            this.#pinch = null
+            this.pinchUntil = Date.now() + 400
+            if (p.el) p.el.style.transform = ''
+            if (Math.abs(p.ratio - 1) > 0.04)
+                this.dispatchEvent(new CustomEvent('zoom-request', { detail: { ratio: p.ratio } }))
+        }
+        doc.addEventListener('touchend', end, { passive: true })
+        doc.addEventListener('touchcancel', end, { passive: true })
     }
     handleScrollKey(e) {
         if (!this.scrolled || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey
@@ -447,26 +518,43 @@ export class FixedLayout extends HTMLElement {
         if (!this.isConnected || !this.#strip) return
         // Размеры вьюпорта читаем один раз: чтение clientWidth после записи
         // style.height заставляло пересчитывать раскладку на каждом из сотен слотов.
-        const width = this.clientWidth
+        const viewWidth = this.clientWidth
         this.#viewHeight = this.clientHeight
+        let stripWidth = viewWidth
+        const current = this.#position.index
         this.#heights = this.#slots.map((slot, index) => {
             const frame = this.#frames.get(index)
             const size = frame?.getSize?.() ?? this.book.sections[index].getCachedSize?.() ?? slot.size
             slot.size = size
+            // Масштаб (serg/tasks#3274): по ширине окна, страница целиком или
+            // число. Страница уже окна — по центру, шире — горизонтальная прокрутка.
+            const width = Math.max(40, Math.round(this.#stripPageWidth(size, viewWidth, this.#viewHeight)))
+            if (width > stripWidth) stripWidth = width
             const scale = width / size.width
+            if (index === current) this.#scale = scale
             const height = size.height * scale + 1
             const css = `${height}px`
             if (slot.style.height !== css) slot.style.height = css
+            const w = `${width}px`
+            if (slot.style.width !== w) { slot.style.width = w; slot.style.marginInline = 'auto' }
             const doc = frame?.iframe.contentDocument
             if (frame?.iframe.isConnected && doc) {
                 Object.assign(frame.iframe.style, { display: 'block', width: `${width}px`, height: `${height - 1}px` })
-                if (frame.onZoom) frame.pending = frame.onZoom({ doc, scale })
+                if (frame.onZoom) frame.pending = this.#zoomFrame(frame, doc, scale)
                 else Object.assign(frame.iframe.style, { width: `${size.width}px`, height: `${size.height}px`, transform: `scale(${scale})`, transformOrigin: 'top left' })
             }
             return height
         })
+        const sw = stripWidth > viewWidth ? `${stripWidth}px` : ''
+        if (this.#strip.style.width !== sw) this.#strip.style.width = sw
         this.#stripHeight = this.#heights.reduce((a, b) => a + b, 0)
         this.#place()
+        // Масштаб поменяли — страница шире окна встаёт по центру, а не прижатой влево.
+        const key = String(this.#zoom)
+        if (key !== this.#zoomKey) {
+            this.#zoomKey = key
+            this.scrollLeft = Math.max(0, (stripWidth - viewWidth) / 2)
+        }
     }
     #syncPages() {
         if (this.#loading) return this.#loading

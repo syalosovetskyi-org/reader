@@ -1277,3 +1277,33 @@ button.ed-name:hover { text-decoration: underline dotted; }
 .split-body .tag i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .split-screen .menu { position: absolute; top: 30px; right: 6px; z-index: 6; width: min(320px, calc(100% - 12px));
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 6px; }
+
+/* Масштаб PDF (serg/tasks#3274): − число + в верхней панели, только у книг-макетов. */
+.pdf-zoom { display: inline-flex; align-items: center; align-self: center;
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden; height: 32px; }
+.pdf-zoom[hidden] { display: none; }
+.pdf-zoom button { cursor: pointer; border: 0; background: transparent; color: var(--fg-dim);
+  height: 100%; font: inherit; -webkit-tap-highlight-color: transparent; }
+.pdf-zoom button:hover { background: var(--bg-soft); color: var(--fg); }
+.pdf-zoom button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pdf-zoom-btn { width: 32px; font-size: 17px !important; }
+.pdf-zoom-val { min-width: 76px; padding: 0 8px; font-size: 12.5px !important;
+  font-variant-numeric: tabular-nums; border-inline: 1px solid var(--line) !important; }
+.pdf-zoom.pdf-zoom-custom .pdf-zoom-val { color: var(--accent-ink); font-weight: 600; }
+/* Узкий экран: кнопок нет, масштаб щипком; число — только если масштаб свой. */
+@media (max-width: 899px) {
+  .pdf-zoom-btn { display: none; }
+  .pdf-zoom .pdf-zoom-val { border-inline: 0 !important; min-width: 0; }
+  .pdf-zoom:not(.pdf-zoom-custom) { display: none; }
+}
+.pdf-zoom-menu { position: fixed; z-index: 60; min-width: 200px; padding: 6px;
+  background: var(--card, var(--bg)); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.18); display: grid; gap: 2px; }
+.pdf-zoom-menu[hidden] { display: none; }
+.pdf-zoom-item { all: unset; cursor: pointer; padding: 9px 12px; border-radius: 6px; font-size: 14px;
+  min-height: 24px; display: flex; align-items: center; }
+.pdf-zoom-item:hover, .pdf-zoom-item:focus-visible { background: var(--bg-soft); }
+.pdf-zoom-item[aria-checked="true"] { color: var(--accent-ink); font-weight: 600; }
+.pdf-zoom-item[aria-checked="true"]::after { content: '✓'; margin-left: auto; padding-left: 12px; }
+.pdf-zoom-sep { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.pdf-zoom-hint { font-size: 12px; color: var(--fg-dim); padding: 6px 12px 4px; }
