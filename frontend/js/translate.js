@@ -85,11 +85,12 @@ function visibleBlocks(doc) {
   const win = doc.defaultView
   if (!win) return { visible: [], all: [] }
   const frame = win.frameElement
-  const fr = frame?.getBoundingClientRect() || { left: 0, top: 0 }
-  const host = view?.renderer?.getBoundingClientRect?.()
-  const vp = host && host.width && host.height
+  const host = frame ? view?.renderer?.getBoundingClientRect?.() : null
+  // Без рамки (документ сам по себе страница) видимая область — его же окно.
+  const fr = frame && host?.width && host?.height ? frame.getBoundingClientRect() : { left: 0, top: 0 }
+  const vp = frame && host?.width && host?.height
     ? host
-    : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+    : { left: 0, top: 0, right: win.innerWidth || 0, bottom: win.innerHeight || 0 }
   const all = [...doc.querySelectorAll(BLOCKS)]
   const visible = []
   for (const el of all) {
