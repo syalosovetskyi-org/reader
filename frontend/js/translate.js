@@ -75,21 +75,51 @@ function applyCached(els) {
 
 export function isTranslateOn() { return on }
 
-// Пересечение с окном документа книги: в «Ленте» содержимое едет по Y, в
-// «Страницах» foliate сдвигает колонки по X — проверка по обеим осям покрывает
-// оба режима без ветвления по prefs.flow.
+// Что видно на ЭКРАНЕ, а не в окне iframe: foliate растягивает iframe главы
+// на всю главу (в «Страницах» — на ширину всех колонок, в «Ленте» — на всю
+// высоту), поэтому окно iframe — это вся глава, и проверка по нему отправляла
+// в перевод главу целиком (300 абзацев, 70 тыс. знаков → 413 от сервера).
+// Координаты блока переводим в координаты страницы через рамку iframe и
+// пересекаем с видимой областью рендерера.
 function visibleBlocks(doc) {
   const win = doc.defaultView
   if (!win) return { visible: [], all: [] }
-  const W = win.innerWidth || 0, H = win.innerHeight || 0
+  const frame = win.frameElement
+  const fr = frame?.getBoundingClientRect() || { left: 0, top: 0 }
+  const host = view?.renderer?.getBoundingClientRect?.()
+  const vp = host && host.width && host.height
+    ? host
+    : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
   const all = [...doc.querySelectorAll(BLOCKS)]
   const visible = []
   for (const el of all) {
     const r = el.getBoundingClientRect()
     if (r.width === 0 && r.height === 0) continue
-    if (r.bottom > 0 && r.top < H && r.right > 0 && r.left < W) visible.push(el)
+    const top = fr.top + r.top, bottom = fr.top + r.bottom
+    const left = fr.left + r.left, right = fr.left + r.right
+    if (bottom > vp.top && top < vp.bottom && right > vp.left && left < vp.right) visible.push(el)
   }
   return { visible, all }
+}
+
+// Потолки сервера (/api/translate): 80 абзацев и 40 000 знаков на запрос.
+// Экран в них укладывается с запасом; обрезка — страховка, чтобы крупный шрифт
+// на большом мониторе или ошибка в подсчёте видимого давали неполный перевод,
+// а не отказ всего запроса.
+const MAX_ITEMS = 60
+const MAX_CHARS = 30000
+function capBatch(els) {
+  const out = []
+  let chars = 0
+  for (const el of els) {
+    const n = (el.textContent || '').trim().length
+    // Абзац длиннее 4000 знаков сервер всё равно не переводит — не тратим на
+    // него бюджет запроса.
+    if (n > 4000) continue
+    if (out.length >= MAX_ITEMS || (out.length && chars + n > MAX_CHARS)) break
+    out.push(el); chars += n
+  }
+  return out
 }
 
 function worthTranslating(el) {
@@ -99,7 +129,7 @@ function worthTranslating(el) {
 
 // Видимое сейчас.
 function currentBlocks(doc) {
-  return visibleBlocks(doc).visible.filter(worthTranslating)
+  return capBatch(visibleBlocks(doc).visible.filter(worthTranslating))
 }
 
 // Запас: столько же блоков сразу за последним видимым.
@@ -109,7 +139,7 @@ function aheadBlocks(doc) {
   const last = all.indexOf(visible[visible.length - 1])
   if (last < 0) return []
   const extra = Math.max(1, visible.length * LOOKAHEAD)
-  return all.slice(last + 1, last + 1 + extra).filter(worthTranslating)
+  return capBatch(all.slice(last + 1, last + 1 + extra).filter(worthTranslating))
 }
 
 // Перевод — плоский текст, поэтому курсив и ссылки внутри абзаца в переведённом
