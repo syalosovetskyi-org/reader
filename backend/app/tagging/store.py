@@ -14,6 +14,22 @@ from .vocab import VOCAB
 log = logging.getLogger("reader.tagging.store")
 
 
+def visible_work_tags(session: Session, work_id: int) -> list[dict]:
+    return [
+        {"id": tag.id, "name": tag.name, "group": tag.group, "source": source}
+        for tag, source in session.exec(
+            select(Tag, WorkTag.source)
+            .join(WorkTag, WorkTag.tag_id == Tag.id)
+            .where(
+                WorkTag.work_id == work_id,
+                WorkTag.removed.is_(False),
+                Tag.state == "active",
+            )
+            .order_by(Tag.id)
+        ).all()
+    ]
+
+
 def sync_vocab(session: Session) -> None:
     existing = {tag.name: tag for tag in session.exec(select(Tag)).all()}
     for group, entries in VOCAB.items():
@@ -22,7 +38,11 @@ def sync_vocab(session: Session) -> None:
             if tag is None:
                 tag = Tag(name=name, group=group)
             tag.group = group
-            tag.synonyms = json.dumps(aliases, ensure_ascii=False)
+            # Синонимы одобренных merge должны переживать перезапуск приложения.
+            tag.synonyms = json.dumps(
+                list(dict.fromkeys([*aliases, *json.loads(tag.synonyms)])),
+                ensure_ascii=False,
+            )
             tag.state = "active"
             tag.merged_into = None
             session.add(tag)

@@ -6,6 +6,7 @@ READERA_SYNC_INTERVAL_MIN > 0 и настроена папка бэкапов.
 from __future__ import annotations
 
 import logging
+import os
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlmodel import Session
@@ -101,7 +102,7 @@ def _ficbook_feed_job() -> None:
             from .db.models import Monitored
             from sqlmodel import select
 
-            if session.exec(select(Monitored).where(Monitored.has_update == True)).first() is None:
+            if session.exec(select(Monitored).where(Monitored.has_update.is_(True))).first() is None:
                 return  # No pending downloads; the full monitor has its own schedule.
         # Сразу докачать книги с has_update=True (без полного счёта глав)
         res = check_job.run_blocking("ficbook_feed", only_pending=True, pull_feeds=False)
@@ -113,11 +114,23 @@ def _ficbook_feed_job() -> None:
         log.warning("Ficbook feed check failed: %s", e)
 
 
+def _tags_desc_job() -> None:
+    from .tagging.desc import run_desc_batch
+
+    try:
+        result = run_desc_batch(limit=40)
+        log.info("Tags description batch: %s", result)
+    except Exception as exc:  # noqa: BLE001 — ошибка фоновой задачи видна в журнале
+        log.warning("Tags description batch failed: %s", exc)
+
+
 def start() -> None:
     global _scheduler
     if _scheduler:
         return
     jobs = []
+    if os.getenv("READER_TAGS_AUTORUN", "").lower() in {"1", "true", "yes", "on"}:
+        jobs.append((_tags_desc_job, 30, "tags_desc"))
     if READERA_SYNC_INTERVAL_MIN > 0 and READERA_BACKUP_REMOTE:
         jobs.append((_readera_import_job, READERA_SYNC_INTERVAL_MIN, "readera_import"))
     if FICBOOK_FEED_INTERVAL_MIN > 0:

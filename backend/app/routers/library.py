@@ -10,6 +10,7 @@ import tempfile
 import zipfile
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
@@ -32,7 +33,7 @@ from ..db.models import (
     utcnow,
 )
 from ..db.session import get_session
-from ..tagging.store import merge_work_tags, try_apply_meta_tags
+from ..tagging.store import merge_work_tags, try_apply_meta_tags, visible_work_tags
 from ..upload_identity import clean_title, extract_identity
 from ..storage import (
     detect_format,
@@ -549,20 +550,70 @@ def get_work(work_id: int, session: Session = Depends(get_session)) -> dict:
     from ..editions import official_epub_for
 
     d = work.model_dump()
-    d["tags"] = [
-        {"id": tag.id, "name": tag.name, "group": tag.group, "source": source}
-        for tag, source in session.exec(
-            select(Tag, WorkTag.source)
-            .join(WorkTag, WorkTag.tag_id == Tag.id)
-            .where(WorkTag.work_id == work_id, WorkTag.removed.is_(False), Tag.state == "active")
-            .order_by(Tag.id)
-        ).all()
-    ]
+    d["tags"] = visible_work_tags(session, work_id)
     d["file_rev"] = file_rev(work)
     d.update(_completeness(work, session))
     off = official_epub_for(session, work)
     d["official_epub_id"] = off.id if off is not None else None
     return d
+
+
+class AddTagIn(BaseModel):
+    tag_id: int
+
+
+class WriteStatusIn(BaseModel):
+    status: Literal["", "done", "wip", "dead"]
+
+
+@router.post("/{work_id}/tags")
+def add_work_tag(
+    work_id: int, body: AddTagIn, session: Session = Depends(get_session)
+) -> list[dict]:
+    if session.get(Work, work_id) is None:
+        raise HTTPException(404, "work not found")
+    tag = session.get(Tag, body.tag_id)
+    if tag is None or tag.state != "active":
+        raise HTTPException(404, "active tag not found")
+    row = session.get(WorkTag, (work_id, tag.id))
+    if row is None:
+        row = WorkTag(work_id=work_id, tag_id=tag.id)
+    row.source, row.confidence, row.removed = "manual", 1.0, False
+    session.add(row)
+    session.commit()
+    return visible_work_tags(session, work_id)
+
+
+@router.delete("/{work_id}/tags/{tag_id}")
+def remove_work_tag(
+    work_id: int, tag_id: int, session: Session = Depends(get_session)
+) -> list[dict]:
+    if session.get(Work, work_id) is None:
+        raise HTTPException(404, "work not found")
+    if session.get(Tag, tag_id) is None:
+        raise HTTPException(404, "tag not found")
+    row = session.get(WorkTag, (work_id, tag_id))
+    if row is None:
+        row = WorkTag(work_id=work_id, tag_id=tag_id)
+    row.source, row.confidence, row.removed = "manual", 1.0, True
+    session.add(row)
+    session.commit()
+    return visible_work_tags(session, work_id)
+
+
+@router.put("/{work_id}/write-status")
+def set_write_status(
+    work_id: int, body: WriteStatusIn, session: Session = Depends(get_session)
+) -> dict:
+    work = session.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "work not found")
+    work.write_status = body.status
+    work.write_status_source = "manual"
+    work.write_status_checked_at = utcnow()
+    session.add(work)
+    session.commit()
+    return {"write_status": work.write_status, "write_status_source": work.write_status_source}
 
 
 def _completeness(work: Work, session: Session) -> dict:
