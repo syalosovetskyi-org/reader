@@ -11,7 +11,7 @@ from typing import Optional
 
 import uuid
 
-from sqlalchemy import BigInteger, Column, Index, text
+from sqlalchemy import BigInteger, CheckConstraint, Column, Index, text
 from sqlmodel import Field, SQLModel
 
 
@@ -56,6 +56,11 @@ class Work(SQLModel, table=True):
     series_index: int = 0  # номер книги в серии (1,2,3…); 0 — неизвестно
     rating: str = ""  # NC-17 | R | PG-13 | 18+ …
     status: str = ""  # в процессе | завершён
+    write_status: str = ""  # '' | done | wip | dead
+    write_status_source: str = ""  # '' | meta | site | search | read | manual
+    write_status_checked_at: datetime | None = None
+    tag_step: int = 0  # последний завершённый шаг каскада разметки
+    tagged_at: datetime | None = None
     words: int = 0  # объём в словах (если известно)
     meta_synced: bool = False  # метаданные уже разобраны (чтобы не тянуть снова)
     # --- EPUB-версия книги с фиксированной вёрсткой (PDF → EPUB, calibre) ---
@@ -96,6 +101,37 @@ class Work(SQLModel, table=True):
     language_manual: bool = False
     # Метка издания для списка изданий: «перевод Катаева», «оригинал».
     edition_label: str = ""
+
+
+class Tag(SQLModel, table=True):
+    """Общий словарь; предложенные теги скрыты до одобрения человеком."""
+
+    __table_args__ = (
+        CheckConstraint("state IN ('active', 'proposed', 'rejected', 'merged')"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    group: str
+    synonyms: str = "[]"  # JSON-список
+    state: str = "active"
+    merged_into: int | None = Field(default=None, foreign_key="tag.id")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class WorkTag(SQLModel, table=True):
+    """Один источник на пару книга/тег; removed хранит ручной запрет."""
+
+    __table_args__ = (
+        CheckConstraint("source IN ('meta', 'desc', 'search', 'read', 'manual')"),
+    )
+
+    work_id: int = Field(primary_key=True, foreign_key="work.id", ondelete="CASCADE")
+    tag_id: int = Field(primary_key=True, foreign_key="tag.id", index=True)
+    source: str = "meta"
+    confidence: float = 1.0
+    removed: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class EditionGroup(SQLModel, table=True):

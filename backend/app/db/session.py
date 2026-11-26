@@ -58,6 +58,11 @@ def init_db() -> None:
     _backfill_content_updated_at()
     if ("progress", "finished_at") in added:
         _backfill_finished()
+    from ..tagging.store import sync_vocab
+
+    with Session(engine) as session:
+        sync_vocab(session)
+        session.commit()
 
 
 def _migrate_add_columns() -> set[tuple[str, str]]:

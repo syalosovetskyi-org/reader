@@ -26,10 +26,13 @@ from ..db.models import (
     Monitored,
     PositionHistory,
     Progress,
+    Tag,
     Work,
+    WorkTag,
     utcnow,
 )
 from ..db.session import get_session
+from ..tagging.store import merge_work_tags, try_apply_meta_tags
 from ..upload_identity import clean_title, extract_identity
 from ..storage import (
     detect_format,
@@ -277,6 +280,7 @@ def _dedup_works(session: Session) -> int:
                         log.debug("Файл дубля %s уже отсутствует: %s", dup.id, dup.file_path)
                     except OSError as e:
                         log.warning("Не удалось удалить файл дубля %s (%s): %s", dup.id, dup.file_path, e)
+                merge_work_tags(session, keep, dup)
                 session.delete(dup)
                 removed_works += 1
     session.commit()
@@ -352,6 +356,7 @@ _LIST_COLUMNS = (
     Work.series_index,
     Work.updated_at,
     Work.content_updated_at,  # «обновлено» для карточки — про главы, не про чтение
+    Work.write_status,
     Work.cover_path,  # только ради cover_v ниже, наружу не отдаётся
 )
 
@@ -378,6 +383,16 @@ def list_works(
     rows = session.exec(
         select(*_LIST_COLUMNS).where(cond).order_by(Work.updated_at.desc())
     ).all()
+    tag_ids: dict[int, list[int]] = {}
+    # Один узкий запрос на всю выдачу, без ORM-моделей тегов и без N+1.
+    for work_id, tag_id in session.exec(
+        select(WorkTag.work_id, WorkTag.tag_id)
+        .join(Tag, Tag.id == WorkTag.tag_id)
+        .join(Work, Work.id == WorkTag.work_id)
+        .where(cond, WorkTag.removed.is_(False), Tag.state == "active")
+        .order_by(WorkTag.work_id, WorkTag.tag_id)
+    ).all():
+        tag_ids.setdefault(work_id, []).append(tag_id)
     for r in rows:
         cover_path = r.cover_path
         cover_v = 0
@@ -397,6 +412,8 @@ def list_works(
                 "updated_at": r.updated_at,
                 "content_updated_at": r.content_updated_at,
                 "cover_v": cover_v,
+                "write_status": r.write_status,
+                "tag_ids": tag_ids.get(r.id, []),
             }
         )
     return result
@@ -424,6 +441,7 @@ def backfill_meta(
             continue
         if bookmeta.apply_meta(w, meta, overwrite=True):
             session.add(w)
+            try_apply_meta_tags(session, w)
             updated += 1
     session.commit()
     return {"scanned": scanned, "updated": updated}
@@ -531,6 +549,15 @@ def get_work(work_id: int, session: Session = Depends(get_session)) -> dict:
     from ..editions import official_epub_for
 
     d = work.model_dump()
+    d["tags"] = [
+        {"id": tag.id, "name": tag.name, "group": tag.group, "source": source}
+        for tag, source in session.exec(
+            select(Tag, WorkTag.source)
+            .join(WorkTag, WorkTag.tag_id == Tag.id)
+            .where(WorkTag.work_id == work_id, WorkTag.removed.is_(False), Tag.state == "active")
+            .order_by(Tag.id)
+        ).all()
+    ]
     d["file_rev"] = file_rev(work)
     d.update(_completeness(work, session))
     off = official_epub_for(session, work)
@@ -640,6 +667,7 @@ async def _import_one(session: Session, path: Path, title: str, job_id: str | No
     if meta:
         bookmeta.apply_meta(work, meta, overwrite=True)
         session.add(work)
+        try_apply_meta_tags(session, work)
         session.commit()
     if job_id:
         upload_progress.update(job_id, "извлечение обложки")
@@ -854,6 +882,7 @@ def clear_update_flag(work_id: int, session: Session = Depends(get_session)) -> 
 
 
 CHILD_MODELS = (
+    WorkTag,
     PositionHistory,
     ChapterMeta,
     Bookmark,
@@ -893,6 +922,7 @@ def delete_work(work_id: int, session: Session = Depends(get_session)) -> dict:
         ).all():
             session.delete(row)
 
+    session.flush()  # дочерние строки удаляем до ON DELETE CASCADE книги
     group_id = work.edition_group_id
     session.delete(work)
     # Книга была изданием в группе: оставшееся одно издание — уже не группа.
