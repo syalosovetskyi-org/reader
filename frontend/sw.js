@@ -27,6 +27,7 @@ const FALLBACK_PRECACHE = [
   '/', '/index.html', '/css/theme.css',
   '/favicon.svg', '/manifest.webmanifest',
   '/js/app.js', '/js/library.js', '/js/reader-core.js', '/js/book-page.js',
+  '/js/tags.js', '/js/library-tags.js', '/js/book-tags.js', '/js/tags-admin.js', '/js/core/tag-filter.js',
   '/vendor/foliate-js/fixed-scroll.js', '/js/navigation.js', '/js/bookmarks.js', '/js/highlights.js', '/js/search.js',
   '/js/progress-bar.js', '/js/chrome.js', '/js/menu-autohide.js', '/js/translate.js',
   '/js/settings.js', '/js/tts.js', '/js/accounts.js', '/js/downloads.js',

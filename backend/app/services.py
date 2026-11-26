@@ -17,6 +17,7 @@ from ..downloaders.base import DownloadResult
 from . import covers
 from .db.models import Progress, Work, utcnow
 from .storage import import_file, sha1_of_file
+from .tagging.store import try_apply_meta_tags
 
 
 def _norm(s: str) -> str:
@@ -32,7 +33,7 @@ def _push_readera(dest) -> None:
         pass
 
 
-def _apply_file(work: Work, dest: Path, result: DownloadResult, sha1: str) -> None:
+def _apply_file(work: Work, dest: Path, result: DownloadResult, sha1: str, session: Session) -> None:
     """Прописать в Work новый файл книги + Calibre/ReadEra/обложка."""
     work.file_path = str(dest)
     work.file_format = result.file_format
@@ -89,6 +90,7 @@ def _apply_file(work: Work, dest: Path, result: DownloadResult, sha1: str) -> No
             meta[k] = result.extra[k]
     if meta:
         bookmeta.apply_meta(work, meta, overwrite=True)
+    try_apply_meta_tags(session, work)
     _push_readera(dest)
 
 
@@ -367,7 +369,7 @@ def register_download(result: DownloadResult, session: Session) -> Work:
             authoritative = bool((result.extra or {}).get("authoritative"))
             if authoritative or fuller or better_structure or more_chapters:
                 dest, _ = import_file(src, sha1)
-                _apply_file(existing, dest, result, sha1)
+                _apply_file(existing, dest, result, sha1, session)
                 # Файл реально заменён — только это событие бампает updated_at.
                 # Библиотека сортируется по updated_at; безусловный бамп при
                 # no-op перекачке (тот же sha1 / не полнее) поднимал книгу на
@@ -398,7 +400,7 @@ def register_download(result: DownloadResult, session: Session) -> Work:
         created_at=utcnow(),
         updated_at=utcnow(),
     )
-    _apply_file(work, dest, result, sha1)
+    _apply_file(work, dest, result, sha1, session)
     session.add(work)
     session.commit()
     session.refresh(work)

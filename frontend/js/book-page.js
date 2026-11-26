@@ -10,13 +10,15 @@ import { coverUrl } from './core/coverpick.js'
 import {
   offlineSupported, isOffline, downloadBook, removeBook, refreshBook, offlineMeta,
 } from './core/offline.js'
-import { filterBy, toggleHidden, isBookFinished, setBookFinished, updateBookIdentity } from './library.js'
+import { filterBy, filterByTag, toggleHidden, isBookFinished, setBookFinished, updateBookIdentity } from './library.js'
 import { convertible, convertStatus, ensureEpub } from './core/convert.js'
 import { logErr } from './core/log.js'
 import { chapterDate } from './core/chapterdate.js'
 import { icon } from './core/icons.js'
 import { renameBook } from './book-identity.js'
 import { mountEditions } from './editions.js'
+import { mountBookTags } from './book-tags.js'
+import { statusBadge, tagClass, SOURCE_LABELS } from './tags.js'
 
 let curWork = null
 
@@ -58,11 +60,6 @@ function applyCover(w, version) {
       `<img src="${coverUrl(w.id, version)}" alt="" onerror="this.remove()" />`
       + `<span class="bp-cover-fallback">${escapeHtml(w.title || 'Без названия')}</span>`
   }
-}
-
-function parseList(s) {
-  if (!s) return []
-  try { const a = JSON.parse(s); return Array.isArray(a) ? a : [] } catch { return [] }
 }
 
 // Кнопка = иконка + подпись. Подпись живёт в .bp-lbl: обработчики ниже меняют
@@ -147,7 +144,11 @@ export async function openBookPage(work) {
   // вместо «Продолжить · 99%».
   const needProg = !(work.id in libProgress)
   const [full, prog] = await Promise.all([
-    api.get(`/api/library/${work.id}`).catch(() => null),
+    api.get(`/api/library/${work.id}`).catch(err => {
+      logErr('Загрузка страницы книги', err)
+      toast('Не удалось загрузить данные книги: ' + err.message, 'err')
+      return null
+    }),
     needProg ? api.get(`/api/progress/${work.id}`).catch(() => null) : null,
   ])
   if (prog && prog.ratio > 0 && !(work.id in libProgress)) libProgress[work.id] = prog.ratio
@@ -177,13 +178,12 @@ function goFilter(value) {
 
 export function bookPageMeta(w) {
   // Компактная разметка метаданных — переиспользуется hover-панелью библиотеки.
-  const genres = parseList(w.genres)
-  const chips = genres.slice(0, 12).map(g => `<span class="bp-chip">${escapeHtml(g)}</span>`).join('')
+  const chips = (w.tags || []).slice(0, 12).map(tag => `<span class="tag-chip${tagClass(tag)}" title="${escapeHtml(SOURCE_LABELS[tag.source] || '')}">${escapeHtml(tag.name)}</span>`).join('')
   const badges = []
   if (w.rating) badges.push(`<span class="bp-badge bp-rating">${escapeHtml(w.rating)}</span>`)
-  if (w.status) badges.push(`<span class="bp-badge bp-status">${escapeHtml(w.status)}</span>`)
   const src = sourceLabel(w)
   if (src) badges.push(`<span class="bp-badge bp-site">${escapeHtml(src)}</span>`)
+  badges.push(`<span class="bp-write-status">${statusBadge(w)}</span>`)
   // Файл хранится в Calibre — отдельный факт, не источник книги.
   if (w.calibre_id && src !== 'Calibre') badges.push('<span class="bp-badge bp-site">Calibre</span>')
   const facts = []
@@ -246,7 +246,7 @@ function canWatch(w) {
 function renderBookPage(w) {
   const ratio = libProgress[w.id] || 0
   const pct = Math.round(ratio * 100)
-  const { chipsHtml, badgesHtml, factsText } = bookPageMeta(w)
+  const { badgesHtml, factsText } = bookPageMeta(w)
   // Всегда запрашиваем /cover — бэкенд лениво сгенерирует обложку ИИ, если её
   // нет. Текст-фолбэк виден, пока грузится/если не удалось.
   const cover = `<img src="/api/reader/${w.id}/cover?v=${w.cover_v || 0}" alt="" onerror="this.remove()" />`
@@ -318,7 +318,7 @@ function renderBookPage(w) {
         </div>
       </div>
     </div>
-    ${chipsHtml ? `<div class="bp-section"><div class="bp-section-h">Жанры и метки</div><div class="bp-chips">${chipsHtml}</div></div>` : ''}
+    <section class="bp-section book-tags" id="bp-tags" aria-label="Теги"></section>
     ${descHtml ? `<div class="bp-section"><div class="bp-section-h">Описание</div>${descHtml}</div>` : ''}
     <div class="bp-section" id="bp-editions"></div>
     <div class="bp-section" id="bp-toc-sec">
@@ -328,6 +328,14 @@ function renderBookPage(w) {
       <div id="bp-toc" class="bp-toc">Загружаю оглавление…</div>
     </div>`
 
+  mountBookTags($('#bp-tags'), $('#bp-body .bp-write-status'), w, {
+    onTag: id => {
+      if (history.state?.bookpage) history.back()
+      else closeBookPage()
+      filterByTag(id)
+    },
+    onSaved: saved => updateBookIdentity(saved),
+  })
   $('#bp-rename').addEventListener('click', () => renameBook(w, (saved) => {
     Object.assign(w, saved)
     updateBookIdentity(saved)

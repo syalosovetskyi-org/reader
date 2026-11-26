@@ -10,6 +10,10 @@ import { libWorks, libCalibre, libHidden, libProgress, libUpdated, libMonitored,
 import { openReader } from './reader-core.js'
 import { openBookPage, bookPageMeta } from './book-page.js'
 import { isOffline, offlineIds, removeBook, downloadBook } from './core/offline.js'
+import { filterBooks, primaryTags } from './core/tag-filter.js'
+import { cachedTags, statusBadge, tagError } from './tags.js'
+import { tagFilter, mountLibraryFilters, renderLibraryFilters, loadLibraryTags, selectLibraryTag } from './library-tags.js'
+import { refreshTagsAdminCount } from './tags-admin.js'
 
 // ---- Ленивая подгрузка обложек ----
 // Раньше карточки рендерились с готовым <img src>, и браузер разом запрашивал
@@ -133,6 +137,7 @@ export function updateBookIdentity(saved) {
   for (const work of [...libWorks, ...libHidden]) {
     if (work.id === saved.id) Object.assign(work, saved)
   }
+  if (hoverDetail.has(saved.id)) hoverDetail.set(saved.id, { ...hoverDetail.get(saved.id), ...saved })
   saveWorksSnap(libWorks)
   applyLibFilter((($('#lib-q') || {}).value || '').trim())
 }
@@ -162,6 +167,8 @@ export async function loadLibrary() {
     // Издания одной группы (serg/tasks#3240): карточка показывает прогресс
     // последнего прочитанного издания. Не пришло — свой прогресс каждой книги.
     api.get('/api/editions/progress').catch((e) => { console.warn('прогресс изданий не загрузился', e); return {} }),
+    loadLibraryTags(),
+    refreshTagsAdminCount(),
   ])
   // Сеть упала — оставляем прошлый набор, а не «ничего не прочитано».
   if (Array.isArray(finishedIds)) {
@@ -277,6 +284,8 @@ export function applyLibFilter(q) {
   resetCoverObserver()  // сбрасываем наблюдатель под новый набор карточек
   // Свои книги: показываем всегда (с фильтром если есть)
   let filtered = q ? hits.works : libWorks
+  filtered = filterBooks(filtered, tagFilter)
+  renderLibraryFilters(libWorks, filtered)
   // Офлайн: сохранённые книги — наверх. Остальные не прячем (видно, что есть в
   // библиотеке), но они уедут вниз и погаснут — см. .no-offline-copy в CSS.
   if (document.body.classList.contains('is-offline')) {
@@ -286,8 +295,11 @@ export function applyLibFilter(q) {
     grid.append(bookCard(w, libProgress[w.id] || 0, libUpdated.has(w.id)))
   }
   // Calibre: показываем только при активном фильтре (и только не импортированные)
-  if (q) for (const b of hits.calibre) grid.append(calibreCard(b))
+  if (q && !tagFilter.status && !tagFilter.tagIds.length) for (const b of hits.calibre) grid.append(calibreCard(b))
   $('#lib-empty').hidden = grid.children.length > 0
+  $('#lib-empty').textContent = tagFilter.status || tagFilter.tagIds.length
+    ? 'Под такой фильтр книг нет. Сними один из тегов.'
+    : q ? 'Ничего не найдено.' : 'Пока пусто. Вставьте ссылку на фанфик или загрузите файл.'
   observeCovers(grid)  // подгрузим обложки только для видимых карточек
   lastFilterApplied = q
 }
@@ -311,6 +323,13 @@ export function filterBy(value) {
   const inp = $('#lib-q')
   if (inp) inp.value = value || ''
   applyLibFilter((value || '').trim())
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+export function filterByTag(tagId) {
+  clearTimeout(filterTimer)
+  $('#lib-q').value = ''
+  selectLibraryTag(tagId)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -473,10 +492,11 @@ function bookCard(w, ratio, hasUpdate) {
     ? '<span class="hidden-badge" title="Скрыта: в библиотеке не показывается, находится поиском">скрыта</span>'
     : ''
   card.innerHTML = `
-    <div class="book-cover">${cover}${badge}${offBadge}${readBadge}${pctBadge}${hidBadge}<button class="book-del-btn" title="Удалить книгу" aria-label="Удалить">✕</button><button class="book-read-btn" title="Читать" aria-label="Читать ${escapeHtml(w.title || 'книгу')}"><span aria-hidden="true">▶</span> Читать</button></div>
+    <div class="book-cover">${cover}${statusBadge(w)}${badge}${offBadge}${readBadge}${pctBadge}${hidBadge}<button class="book-del-btn" title="Удалить книгу" aria-label="Удалить">✕</button><button class="book-read-btn" title="Читать" aria-label="Читать ${escapeHtml(w.title || 'книгу')}"><span aria-hidden="true">▶</span> Читать</button></div>
     <div class="book-meta">
       <div class="b-title">${escapeHtml(w.title || 'Без названия')}</div>
       <div class="b-author${w.author ? ' b-link' : ''}" data-flt="author">${escapeHtml(w.author || '')}</div>
+      <div class="book-main-tags">${primaryTags(w, cachedTags()).map(tag => `<span>${escapeHtml(tag.name)}</span>`).join('')}</div>
       ${w.series ? `<div class="b-series b-link" data-flt="series" title="Показать всю серию">📚 ${escapeHtml(w.series)}${w.series_index ? ' #' + w.series_index : ''}</div>` : ''}
     </div>
     <div class="book-progress"><i style="width:${done ? 100 : (ratio > 0 ? Math.min(pct, 99) : 0)}%"></i></div>`
@@ -536,6 +556,17 @@ async function importCalibre(card, b) {
 }
 
 const bookGrid = $('#book-grid')
+
+mountLibraryFilters({
+  onChange: () => applyLibFilter(isUrlQuery($('#lib-q').value) ? '' : $('#lib-q').value.trim()),
+  getBooks: () => {
+    const q = $('#lib-q').value.trim()
+    return q && !isUrlQuery(q) ? findLibMatches(q).works : libWorks
+  },
+})
+window.addEventListener('tags-updated', () => loadLibrary().catch(err => {
+  tagError('Не удалось обновить библиотеку', err)
+}))
 
 bookGrid.addEventListener('click', (e) => {
   const card = e.target.closest('.book-card')

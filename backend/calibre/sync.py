@@ -26,6 +26,7 @@ from sqlmodel import Session, select
 
 from ..app.config import CALIBRE_CACHE_DIR, CALIBRE_CACHE_MAX_MB, COVERS_DIR
 from ..app.db.models import Blacklist, Bookmark, Highlight, Monitored, Progress, Work, utcnow
+from ..app.tagging.store import merge_work_tags, try_apply_meta_tags
 from . import client
 
 log = logging.getLogger("reader.calibre.sync")
@@ -116,6 +117,7 @@ def merge_work(session: Session, keep: Work, drop: Work) -> None:
                 session.add(kp)
             session.delete(dp)
     old = drop.file_path
+    merge_work_tags(session, keep, drop)
     session.delete(drop)
     if old and old != keep.file_path and os.path.exists(old):
         try:
@@ -175,6 +177,7 @@ def migrate_local_to_refs(session: Session, dry_run: bool = True) -> dict:
                 w.description = b.get("description") or ""
             if not w.genres and b.get("tags"):
                 w.genres = json.dumps(b["tags"], ensure_ascii=False)
+                try_apply_meta_tags(session, w)
             w.meta_synced = True
             session.add(w)
             assigned[cid] = w
@@ -264,32 +267,33 @@ def sync_catalog(session: Session) -> dict:
                     cand.description = desc
                 if genres != "[]" and not cand.genres:
                     cand.genres = genres
+                    try_apply_meta_tags(session, cand)
                 session.add(cand)
                 existing[cid] = cand
                 updated += 1
                 continue
-            session.add(
-                Work(
-                    title=b["title"],
-                    author=b["authors"],
-                    site="calibre",
-                    calibre_id=cid,
-                    file_path="",
-                    file_format=fmt,
-                    sha1="",
-                    source_url="",
-                    description=desc,
-                    genres=genres,
-                    meta_synced=True,
-                    created_at=utcnow(),
-                    # НЕ utcnow(): библиотека сортируется по updated_at, и книга,
-                    # годами лежащая в каталоге Calibre, всплывала бы наверх в тот
-                    # момент, когда синк впервые завёл на неё Work-ссылку. Берём
-                    # дату из каталога; нет её — уводим вниз (created_at остаётся
-                    # честным «когда запись появилась у нас»).
-                    updated_at=b.get("updated") or datetime(1970, 1, 1),
-                )
+            w = Work(
+                title=b["title"],
+                author=b["authors"],
+                site="calibre",
+                calibre_id=cid,
+                file_path="",
+                file_format=fmt,
+                sha1="",
+                source_url="",
+                description=desc,
+                genres=genres,
+                meta_synced=True,
+                created_at=utcnow(),
+                # НЕ utcnow(): библиотека сортируется по updated_at, и книга,
+                # годами лежащая в каталоге Calibre, всплывала бы наверх в тот
+                # момент, когда синк впервые завёл на неё Work-ссылку. Берём
+                # дату из каталога; нет её — уводим вниз (created_at остаётся
+                # честным «когда запись появилась у нас»).
+                updated_at=b.get("updated") or datetime(1970, 1, 1),
             )
+            session.add(w)
+            try_apply_meta_tags(session, w)
             added += 1
         else:
             changed = False
@@ -301,6 +305,7 @@ def sync_catalog(session: Session) -> dict:
                 changed = True
             if genres != "[]" and not w.genres:
                 w.genres = genres
+                try_apply_meta_tags(session, w)
                 changed = True
             if changed:
                 # Обогащение метаданных — не контент-событие: updated_at не
