@@ -62,6 +62,7 @@
   <section id="library" class="screen">
     <header class="lib-header">
       <h1 class="lib-title">Моя библиотека <span id="pending-pill" class="pending-pill" hidden></span></h1>
+      <button id="lib-filter-mobile" type="button" class="tag-chip" aria-expanded="false" aria-controls="lib-tag-picker">Фильтр · 0</button>
       <div class="lib-actions">
         <form id="ingest-form" class="ingest" role="search" autocomplete="off">
           <input id="lib-q" type="search" placeholder="Поиск, ссылка или название…" autocomplete="off" />
@@ -69,6 +70,7 @@
                   title="Enter: открыть свою книгу, а если такой нет — скачать">Добавить</button>
         </form>
         <button id="more-actions-btn" type="button" class="btn-ghost more-toggle" aria-expanded="false" title="Ещё действия">··· Ещё</button>
+        <button id="tags-admin-btn" type="button" class="btn-ghost tags-more-item">Теги <span id="tags-pending-count"></span></button>
         <label class="btn-ghost lib-secondary" for="upload-input">Загрузить файл</label>
         <input id="upload-input" type="file" accept=".epub,.fb2,.pdf,.zip" multiple hidden />
         <button id="web-btn" type="button" class="btn-ghost lib-secondary" title="Собрать книгу из нескольких статей">Из статей</button>
@@ -78,6 +80,23 @@
         <button id="accounts-btn" class="btn-ghost lib-secondary" title="Аккаунты и обновления">Аккаунты</button>
       </div>
     </header>
+    <div id="lib-tag-filter" class="tag-filterbar" aria-label="Фильтры библиотеки">
+      <div id="lib-status-segment" class="tag-segment" role="group" aria-label="Статус"></div>
+      <button id="lib-tags-btn" type="button" class="tag-chip" aria-expanded="false" aria-controls="lib-tag-picker">Теги ▾</button>
+      <div id="lib-picked-tags" class="tag-chips"></div>
+      <span id="lib-tag-count" class="tag-muted" role="status" aria-live="polite"></span>
+      <div id="lib-tag-picker" class="tag-picker" aria-label="Фильтр библиотеки" tabindex="-1" hidden>
+        <div class="tag-sheet-heading"><b>Фильтр</b><button id="lib-tag-close" type="button" class="btn-ghost" aria-label="Закрыть фильтр">✕</button></div>
+        <div id="lib-sheet-status" hidden></div>
+        <input id="lib-tag-q" type="search" placeholder="Найти тег…" aria-label="Найти тег" autocomplete="off">
+        <div id="lib-tag-groups"></div>
+        <div id="lib-sheet-footer" class="tag-sheet-footer" hidden>
+          <button id="lib-tag-reset" type="button" class="btn-ghost">Сбросить</button>
+          <button id="lib-tag-apply" type="button" class="btn-primary">Показать</button>
+        </div>
+      </div>
+    </div>
+    <div id="lib-tag-scrim" class="tag-scrim" hidden></div>
     <div id="ingest-status" class="ingest-status" hidden></div>
     <!-- Панель «Скачивания» (serg/tasks#893): данные с сервера, переживает перезагрузку и рестарт -->
     <button id="dl-toggle" type="button" class="dl-toggle" hidden aria-controls="dl-panel" aria-expanded="false"></button>
