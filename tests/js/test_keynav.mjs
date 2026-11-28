@@ -54,3 +54,13 @@ assert.equal(kn.keyNavAction('End'), 'chapterEnd')
 assert.equal(kn.keyNavAction('Home'), 'chapterStart')
 
 console.log('ok: test_keynav.mjs')
+
+// --- F / А — полный экран (Серж 28.11.2026) ---------------------------------
+assert.equal(kn.keyNavAction('f', { code: 'KeyF' }), 'fullscreen')
+assert.equal(kn.keyNavAction('F', { code: 'KeyF', shift: true }), 'fullscreen')
+assert.equal(kn.keyNavAction('а', { code: 'KeyF' }), 'fullscreen')   // ru/uk раскладка
+assert.equal(kn.keyNavAction('А', { code: 'KeyF' }), 'fullscreen')
+assert.equal(kn.keyNavAction('а', {}), 'fullscreen')                 // экранная клавиатура без code
+assert.equal(kn.keyNavAction('f', { code: 'KeyF', ctrl: true }), null) // Ctrl+F — поиск браузера
+assert.equal(kn.keyNavAction('f', { code: 'KeyF', alt: true }), null)
+assert.equal(kn.keyNavAction('ф', { code: 'KeyA' }), null)            // «ф» — это клавиша A
