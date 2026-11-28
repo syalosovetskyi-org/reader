@@ -111,14 +111,21 @@ $('#tap-next').addEventListener('click', goNext)
 // Клавиатура: стрелки, PageUp/Down, Home/End, пробел и Enter (вниз; с Shift — вверх).
 function handleKey(e) {
   if ($('#reader').hidden || !view) return
-  // Два издания рядом: клавиши листают половины сами, а не скрытую под ними книгу.
-  if (document.body.classList.contains('split-open')) return
-  // В полях ввода (поиск, заметки) клавиши листания не перехватываем.
+  // В полях ввода (поиск, заметки) клавиши не перехватываем.
   const t = e.target
   if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || ''))) return
+  const mods = { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey, alt: e.altKey, code: e.code }
+  // F/А — полный экран; работает и при двух изданиях рядом.
+  if (keyNavAction(e.key, mods) === 'fullscreen') {
+    if (!e.repeat) toggleFullscreen()
+    e.preventDefault()
+    return
+  }
+  // Два издания рядом: клавиши листают половины сами, а не скрытую под ними книгу.
+  if (document.body.classList.contains('split-open')) return
   if (view.renderer?.handleScrollKey?.(e)) return
   if (e.defaultPrevented) return
-  const action = keyNavAction(e.key, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })
+  const action = keyNavAction(e.key, mods)
   if (!action) return
   if (action === 'prev') goPrev()
   else if (action === 'next') goNext()
